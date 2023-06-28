@@ -1,0 +1,13 @@
+[{
+    "name": "Number of boosting iterations",
+    "value": "10",
+    "type": "int",
+    "help": "Number of boosting iterations",
+    "param": "num-iterations"
+}, {
+    "name": "Max. depth",
+    "value": "20",
+    "type": "int",
+    "help": "Limit the max depth for tree model. This is used to deal with over-fitting when the dataset is small.",
+    "param": "max-depth"
+}]
