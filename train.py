@@ -111,7 +111,7 @@ def main_function():
                                         input_signature=[
                                             tf.TensorSpec(shape=[1, num_features], dtype=tf.float32, name='input')
                                         ],
-                                        output_signature=[1, 6])
+                                        output_signature=[1, num_classes])
         print('Converting to TensorFlow Lite OK')
         print('')
     except Exception as e:
