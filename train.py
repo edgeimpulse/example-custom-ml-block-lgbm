@@ -100,7 +100,7 @@ def main_function():
 
     try:
         print('Converting to TensorFlow Lite...')
-        lgbm = edgeimpulse.jax.lgbm.LGBM(clf, [1, num_features], 6)
+        lgbm = edgeimpulse.jax.lgbm.LGBM(clf, [1, num_features], num_classes)
 
         def pred_jax(x):
             return lgbm.predict(x)
