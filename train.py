@@ -61,10 +61,8 @@ def exit_gracefully(signum, frame):
 def main_function():
     """This function is used to avoid contaminating the global scope"""
 
-    image_input_scaling = input.imageInputScaling
-
     train_dataset, validation_dataset, samples_dataset, X_train, X_test, Y_train, Y_test, has_samples, X_samples, Y_samples = ei_tensorflow.training.get_dataset_from_folder(
-        input, args.data_directory, RANDOM_SEED, None, MODEL_INPUT_SHAPE, image_input_scaling
+        input, args.data_directory, RANDOM_SEED, None, MODEL_INPUT_SHAPE, None
     )
 
     print('')
