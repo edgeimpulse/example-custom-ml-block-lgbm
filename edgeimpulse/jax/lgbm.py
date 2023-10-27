@@ -21,10 +21,10 @@ def softmax(values):
     return res
 
 def pred_lgbm(x):
-    if tree_attributes['quantize']:
-        x = ((x - tree_attributes['x_min']) / tree_attributes['x_diff']) * 255
-        x = jnp.clip(x, 0, 255)
-        x = jnp.array(x, dtype=jnp.uint8)
+    # if tree_attributes['quantize']:
+    #     x = ((x - tree_attributes['x_min']) / tree_attributes['x_diff']) * 255
+    #     x = jnp.clip(x, 0, 255)
+    #     x = jnp.array(x, dtype=jnp.uint8)
 
     def tree(tree_ix):
         def leaf(leaf_ix):
@@ -38,13 +38,13 @@ def pred_lgbm(x):
                    .at[tree_attributes['nodes_classids'][rx - tree_attributes['num_internal_nodes']]]
                    .set(tree_attributes['nodes_weights'][rx - tree_attributes['num_internal_nodes']])
                    )(rix)
-    return softmax(jnp.sum(res, axis=0))
+    return jnp.sum(res, axis=0)
 
 def tree_classifier_prim(x):
   return tree_classifier_p.bind(x)
 
 class LGBM:
-    def __init__(self, lgbm, input_shape, num_classes, quantize=False, x=None, y=None):
+    def __init__(self, lgbm, input_shape, num_classes=1, quantize=False, x=None, y=None):
         self.lgbm = lgbm
         self.lgbm_attributes = extract_lgbm(lgbm, input_shape, num_classes, quantize, x, y)
         self.input_shape = input_shape
@@ -54,11 +54,18 @@ class LGBM:
         tree_classifier_p.def_impl(tree_classifier_impl)
 
         def tree_classifier_abstract_eval(x):
-            return abstract_arrays.ShapedArray((num_classes,), dtype=jnp.float32)
+            return abstract_arrays.ShapedArray((1, num_classes), dtype=jnp.float32)
         tree_classifier_p.def_abstract_eval(tree_classifier_abstract_eval)
 
     def predict(self, x):
-        return tree_classifier_prim(x)
+        res = tree_classifier_prim(x)
+        if tree_attributes['objective'].startswith('binary'):
+            res = jax.nn.sigmoid(res)
+            res = jnp.concatenate([res, 1.0 - res])
+            res = res.reshape((1,2))
+        elif tree_attributes['objective'].startswith('multiclass'):
+            res = jax.nn.softmax(res)
+        return res
 
 def get_attrvals_i(converted, name):
     for i in range(len(converted.graph.node._values)):
@@ -109,15 +116,26 @@ def to_mode(s):
 def extract_lgbm(lgbm, input_shape, num_classes, quantize=False, x=None, y=None):
     initial_type = [('float_input', FloatTensorType(input_shape))]
     converted = convert_lightgbm(lgbm, initial_types=initial_type)
+    objective = lgbm.dump_model()['objective']
+    regression = objective == 'regression'
 
     _nodes_treeids = np.array(get_attrvals_i(converted, 'nodes_treeids'), dtype=jnp.int32)
     _tree_ids = np.array(list(sorted(set(get_attrvals_i(converted, 'nodes_treeids')))))
 
-    _class_ids = np.array(get_attrvals_i(converted, 'class_ids'), dtype=jnp.int32)
-    _classes = np.unique(_class_ids)
-    _class_weights = np.array(get_attrvals_f(converted, 'class_weights'), dtype=jnp.float32)
-    _class_nodeids = np.array(get_attrvals_i(converted, 'class_nodeids'), dtype=jnp.int32)
-    _class_treeids = np.array(get_attrvals_i(converted, 'class_treeids'), dtype=jnp.int32)
+    _class_ids = None
+    _class_weights = None
+    _class_nodeids = None
+    _class_treeids = None
+    _target_weights = None
+    if not regression:
+        _class_ids = np.array(get_attrvals_i(converted, 'class_ids'), dtype=jnp.int32)
+        _class_weights = np.array(get_attrvals_f(converted, 'class_weights'), dtype=jnp.float32)
+        _class_nodeids = np.array(get_attrvals_i(converted, 'class_nodeids'), dtype=jnp.int32)
+        _class_treeids = np.array(get_attrvals_i(converted, 'class_treeids'), dtype=jnp.int32)
+    else:
+        _target_nodeids = np.array(get_attrvals_i(converted, 'target_nodeids'), dtype=jnp.int32)
+        _target_treeids = np.array(get_attrvals_i(converted, 'target_treeids'), dtype=jnp.int32)
+        _target_weights = np.array(get_attrvals_f(converted, 'target_weights'), dtype=jnp.float32)
 
     _nodes_modes = np.array(list(map(lambda x: int(to_mode(str(x).replace('b', '').replace('\'', ''))), get_attrvals_s(converted, 'nodes_modes'))), dtype=np.int16)
     _nodes_featureids = np.array(get_attrvals_i(converted, 'nodes_featureids'), dtype=jnp.int32)
@@ -130,11 +148,19 @@ def extract_lgbm(lgbm, input_shape, num_classes, quantize=False, x=None, y=None)
         _nodes_truenodeids[ix] = _nodes_truenodeids[ix] + _tree_root_ids[_nodes_treeids[ix]]
         _nodes_falsenodeids[ix] = _nodes_falsenodeids[ix] + _tree_root_ids[_nodes_treeids[ix]]
 
-    _nodes_weights = np.full(_nodes_treeids.shape[0], -1, dtype=jnp.float32) #.fill(-1)
-    _nodes_classids = np.full(_nodes_treeids.shape[0], -1, dtype=jnp.int32) #.fill(-1)
-    for ix in range(_class_ids.shape[0]):
-        _nodes_weights[_tree_root_ids[_class_treeids[ix]] + _class_nodeids[ix]] = _class_weights[ix]
-        _nodes_classids[_tree_root_ids[_class_treeids[ix]] + _class_nodeids[ix]] = _class_ids[ix]
+    _nodes_weights = None
+    _nodes_classids = None
+    if not regression:
+        _nodes_weights = np.full(_nodes_treeids.shape[0], -1, dtype=jnp.float32)
+        _nodes_classids = np.full(_nodes_treeids.shape[0], -1, dtype=jnp.int32)
+        for ix in range(_class_ids.shape[0]):
+            _nodes_weights[_tree_root_ids[_class_treeids[ix]] + _class_nodeids[ix]] = _class_weights[ix]
+            _nodes_classids[_tree_root_ids[_class_treeids[ix]] + _class_nodeids[ix]] = _class_ids[ix]
+    else:
+        _nodes_weights = np.full(_nodes_treeids.shape[0], -1, dtype=jnp.float32)
+        _nodes_classids = np.full(_nodes_treeids.shape[0], -1, dtype=jnp.int32)
+        for ix in range(_target_weights.shape[0]):
+            _nodes_weights[_tree_root_ids[_target_treeids[ix]] + _target_nodeids[ix]] = _target_weights[ix]
 
     x_min = None
     x_diff = None
@@ -148,7 +174,7 @@ def extract_lgbm(lgbm, input_shape, num_classes, quantize=False, x=None, y=None)
     _nodes_values_new = []
     _nodes_truenodeids_new = []
     _nodes_falsenodeids_new = []
-    _nodes_classids_new = []
+    _nodes_classids_new = None
     _nodes_id_mapping = {}
     _nodes_weights_new = []
     _tree_root_ids_new = []
@@ -165,15 +191,25 @@ def extract_lgbm(lgbm, input_shape, num_classes, quantize=False, x=None, y=None)
             _nodes_id_mapping[ix] = num_internal_nodes
             num_internal_nodes = num_internal_nodes + 1
 
-    for ix in range(_nodes_modes.shape[0]):
-        if int(_nodes_modes[ix]) != 0:
-            continue
-        _nodes_classids_new.append(_nodes_classids[ix])
-        _nodes_weights_new.append(_nodes_weights[ix])
-        _nodes_id_mapping[ix] = num_internal_nodes + num_leaf_nodes
-        num_leaf_nodes = num_leaf_nodes + 1
+    _nodes_classids_new = None
+    _nodes_weights_new = []
+    if not regression:
+        _nodes_classids_new = []
+        for ix in range(_nodes_modes.shape[0]):
+            if int(_nodes_modes[ix]) != 0:
+                continue
+            _nodes_classids_new.append(_nodes_classids[ix])
+            _nodes_weights_new.append(_nodes_weights[ix])
+            _nodes_id_mapping[ix] = num_internal_nodes + num_leaf_nodes
+            num_leaf_nodes = num_leaf_nodes + 1
+    else:
+        for ix in range(_nodes_modes.shape[0]):
+            if int(_nodes_modes[ix]) != 0:
+                continue
+            _nodes_weights_new.append(_nodes_weights[ix])
+            _nodes_id_mapping[ix] = num_internal_nodes + num_leaf_nodes
+            num_leaf_nodes = num_leaf_nodes + 1
 
-    # print('node id mapping: ' + str(_nodes_id_mapping))
     for ix in range(_nodes_modes.shape[0]):
         if int(_nodes_modes[ix]) == 0:
             continue
@@ -217,16 +253,17 @@ def extract_lgbm(lgbm, input_shape, num_classes, quantize=False, x=None, y=None)
     # print('class_weights: ' + format_c_arr(_class_weights))
     # print('class_nodeids: ' + format_c_arr(_class_nodeids))
     # print('class_treeids: ' + format_c_arr(_class_treeids))
+
     # print('node_tree_ids ' + format_c_arr(_nodes_treeids))
     # print('tree_ids ' + format_c_arr(_tree_ids))
-    # print('node_modes: ' + format_c_arr(_nodes_modes))
-    # print('nodes_featureids: ' + format_c_arr(_nodes_featureids))
-    # print('nodes_values: ' + format_c_arr(_nodes_values))
-    # print('nodes_truenodeids: ' + format_c_arr(_nodes_truenodeids))
-    # print('nodes_falsenodeids: ' + format_c_arr(_nodes_falsenodeids))
-    # print('nodes_weights: ' + format_c_arr(_nodes_weights))
+    # print('node_modes: ' + format_c_arr(_nodes_modes_new))
+    # print('nodes_featureids: ' + format_c_arr(_nodes_featureids_new))
+    # print('nodes_values: ' + format_c_arr(_nodes_values_new))
+    # print('nodes_truenodeids: ' + format_c_arr(_nodes_truenodeids_new))
+    # print('nodes_falsenodeids: ' + format_c_arr(_nodes_falsenodeids_new))
+    # print('nodes_weights: ' + format_c_arr(_nodes_weights_new))
     # print('nodes_classids: ' + format_c_arr(_nodes_classids))
-    # print('tree_root_ids: ' + format_c_arr(_tree_root_ids))
+    # print('tree_root_ids: ' + format_c_arr(_tree_root_ids_new))
 
     print('num roots: ' + str(len(_tree_root_ids)))
     print('num total nodes: ' + str(len(_nodes_modes)))
@@ -234,52 +271,54 @@ def extract_lgbm(lgbm, input_shape, num_classes, quantize=False, x=None, y=None)
     print('num internal nodes: ' + str(num_internal_nodes))
     print('num leaf nodes: ' + str(np.count_nonzero(_nodes_modes == 0)))
     print('num internal nodes: ' + str(np.count_nonzero(_nodes_modes != 0)))
+    print('num classes: ' + str(num_classes))
     print('---------------------------------------------------')
     print('')
 
     global tree_attributes
     tree_attributes = None
-    if quantize:
-        for ix in range(_nodes_featureids.shape[0]):
-            _nodes_values[ix] = ((_nodes_values[ix] - x_min[_nodes_featureids[ix]]) / x_diff[_nodes_featureids[ix]]) * 255
-        _nodes_values = np.clip(_nodes_values, 0, 255)
+    tree_attributes = {
+        'num_leaf_nodes': num_leaf_nodes,
+        'num_internal_nodes': num_internal_nodes,
+        'equality_operator': 'leq',
+        "tree_root_ids": jnp.array(_tree_root_ids_new, dtype=jnp.int32),
+        "nodes_featureids": jnp.array(_nodes_featureids_new, dtype=jnp.int32),
+        "nodes_modes": jnp.array(_nodes_modes_new, dtype=jnp.int32),
+        "nodes_values": jnp.array(_nodes_values_new, dtype=jnp.float32),
+        "nodes_truenodeids": jnp.array(_nodes_truenodeids_new, dtype=jnp.int32),
+        "nodes_falsenodeids": jnp.array(_nodes_falsenodeids_new, dtype=jnp.int32),
+        "nodes_classids": jnp.zeros(num_leaf_nodes, dtype=jnp.int32) if regression else jnp.array(_nodes_classids_new, dtype=jnp.int32),
+        "nodes_weights": jnp.array(_nodes_weights_new, dtype=jnp.float32),
+        "num_classes": 1 if objective.startswith('binary') else num_classes,
+        "quantize": quantize,
+        "x_min": x_min,
+        "x_diff": x_diff,
+        "regression": regression,
+        "objective": objective
+    }
 
-        tree_attributes = {
-            'num_leaf_nodes': np.count_nonzero(_nodes_modes == 0),
-            'num_internal_nodes': np.count_nonzero(_nodes_modes != 0),
-            'equality_operator': 'leq',
-            "tree_root_ids": jnp.array(_tree_root_ids, dtype=jnp.int32),
-            "nodes_featureids": jnp.array(_nodes_featureids, dtype=jnp.int32),
-            "nodes_modes": jnp.array(_nodes_modes, dtype=jnp.int32),
-            "nodes_values": jnp.array(_nodes_values, dtype=jnp.uint8),
-            "nodes_truenodeids": jnp.array(_nodes_truenodeids, dtype=jnp.int32),
-            "nodes_falsenodeids": jnp.array(_nodes_falsenodeids, dtype=jnp.int32),
-            "nodes_classids": jnp.array(_nodes_classids, dtype=jnp.int32),
-            "nodes_weights": jnp.array(_nodes_weights, dtype=jnp.float32),
-            "class_weights": jnp.array(_class_weights, dtype=jnp.float32),
-            "num_classes": num_classes,
-            "quantize": quantize,
-            "x_min": x_min,
-            "x_diff": x_diff
-        }
-    else:
-        tree_attributes = {
-            'num_leaf_nodes': num_leaf_nodes,
-            'num_internal_nodes': num_internal_nodes,
-            'equality_operator': 'leq',
-            "tree_root_ids": jnp.array(_tree_root_ids_new, dtype=jnp.int32),
-            "nodes_featureids": jnp.array(_nodes_featureids_new, dtype=jnp.int32),
-            "nodes_modes": jnp.array(_nodes_modes_new, dtype=jnp.int32),
-            "nodes_values": jnp.array(_nodes_values_new, dtype=jnp.float32),
-            "nodes_truenodeids": jnp.array(_nodes_truenodeids_new, dtype=jnp.int32),
-            "nodes_falsenodeids": jnp.array(_nodes_falsenodeids_new, dtype=jnp.int32),
-            "nodes_classids": jnp.array(_nodes_classids_new, dtype=jnp.int32),
-            "nodes_weights": jnp.array(_nodes_weights_new, dtype=jnp.float32),
-            "class_weights": jnp.array(_class_weights, dtype=jnp.float32),
-            "num_classes": num_classes,
-            "quantize": quantize,
-            "x_min": x_min,
-            "x_diff": x_diff
-        }
+    # if quantize:
+    #     for ix in range(_nodes_featureids.shape[0]):
+    #         _nodes_values[ix] = ((_nodes_values[ix] - x_min[_nodes_featureids[ix]]) / x_diff[_nodes_featureids[ix]]) * 255
+    #     _nodes_values = np.clip(_nodes_values, 0, 255)
+
+    #     tree_attributes = {
+    #         'num_leaf_nodes': np.count_nonzero(_nodes_modes == 0),
+    #         'num_internal_nodes': np.count_nonzero(_nodes_modes != 0),
+    #         'equality_operator': 'leq',
+    #         "tree_root_ids": jnp.array(_tree_root_ids, dtype=jnp.int32),
+    #         "nodes_featureids": jnp.array(_nodes_featureids, dtype=jnp.int32),
+    #         "nodes_modes": jnp.array(_nodes_modes, dtype=jnp.int32),
+    #         "nodes_values": jnp.array(_nodes_values, dtype=jnp.uint8),
+    #         "nodes_truenodeids": jnp.array(_nodes_truenodeids, dtype=jnp.int32),
+    #         "nodes_falsenodeids": jnp.array(_nodes_falsenodeids, dtype=jnp.int32),
+    #         #"nodes_classids": jnp.array(_nodes_classids, dtype=jnp.int32),
+    #         "nodes_weights": jnp.array(_nodes_weights, dtype=jnp.float32),
+    #         #"class_weights": jnp.array(_class_weights, dtype=jnp.float32),
+    #         "num_classes": num_classes,
+    #         "quantize": quantize,
+    #         "x_min": x_min,
+    #         "x_diff": x_diff
+    #     }
 
     return tree_attributes

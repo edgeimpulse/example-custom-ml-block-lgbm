@@ -18,6 +18,19 @@ def convert(fun, model_path, lgbm, input_signature, output_signature):
 
 
 def convert_tflite(fun, input_signature):
+    # fh = open('int8.lite', 'rb')
+    # model = flatbuffer_utils.convert_bytearray_to_object(bytearray(fh.read()))
+    # for g in model.subgraphs:
+    #    for t in g.tensors:
+    #       print('tensor: ' + str(t.name))
+    #       print(str(t.quantization.scale))
+    #       #print(str(t.quantization.max))
+    #       #print(str(t.quantization.min))
+    #       print(str(t.quantization.zeroPoint))
+    #       #print(str(t.quantization.quantizedDimension))
+    #       #print(str(t.quantization.details))
+    #       #print(str(t.quantization.detailsType))
+
     tf_predict = tf.function(
         edgeimpulse.jax.jax2tf.convert(fun, enable_xla=False),
         input_signature=input_signature,
@@ -59,10 +72,16 @@ def patch_custom_operators(tflite_model, tree_attributes, output_signature):
     options = fbb.Finish()
 
     for s in model.subgraphs:
+      # for t in s.tensors:
+      #   if t.shape.size == 0 or t.shape != [21]:
+      #      t.shape = [1, 6]
       for o in s.operators:
         if str(model.operatorCodes[o.opcodeIndex].customCode) ==  "TreeEnsembleClassifier":
             o.customOptions = np.array(options, dtype=np.uint8)
             for g in o.outputs:
                s.tensors[g].shape = output_signature
 
+    # model.subgraphs[0].tensors[0].quantization = schema_fb.QuantizationParametersT()
+    # model.subgraphs[0].tensors[0].quantization.scale = [0.09197311]
+    # model.subgraphs[0].tensors[0].quantization.zeroPoint = [-64]
     return model
