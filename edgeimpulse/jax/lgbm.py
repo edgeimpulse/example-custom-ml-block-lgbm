@@ -61,7 +61,7 @@ class LGBM:
         res = tree_classifier_prim(x)
         if tree_attributes['objective'].startswith('binary'):
             res = jax.nn.sigmoid(res)
-            res = jnp.concatenate([res, 1.0 - res])
+            res = jnp.concatenate([1.0 - res, res])
             res = res.reshape((1,2))
         elif tree_attributes['objective'].startswith('multiclass'):
             res = jax.nn.softmax(res)
