@@ -71,12 +71,21 @@ def main_function():
     Y_train = np.argmax(Y_train, axis=1)
     Y_test = np.argmax(Y_test, axis=1)
 
+    num_features = MODEL_INPUT_SHAPE[0]
+    num_classes = len(input.classes)
+    print('num features: ' + str(num_features))
+    print('num classes: ' + str(num_classes))
+
     num_iterations = args.num_iterations or 10
     max_depth = args.max_depth or 20
     print('Num. iterations: ' + str(num_iterations))
     print('Max. depth: ' + str(max_depth))
 
-    clf = lgb.LGBMClassifier(num_iterations=num_iterations, max_depth=max_depth)
+    if num_classes == 2:
+        clf = lgb.LGBMClassifier(num_iterations=num_iterations, max_depth=max_depth, objective='binary')
+    else:
+        clf = lgb.LGBMClassifier(num_iterations=num_iterations, max_depth=max_depth)
+
     clf.fit(X_train, Y_train)
 
     print(' ')
@@ -89,10 +98,6 @@ def main_function():
     print(f'Accuracy (validation set): {num_correct / len(Y_test)}')
 
     clf = clf.booster_
-    num_features = MODEL_INPUT_SHAPE[0]
-    num_classes = len(input.classes)
-    print('num features: ' + str(num_features))
-    print('num classes: ' + str(num_classes))
 
     file_float32 = os.path.join(args.out_directory, 'model.tflite')
 
