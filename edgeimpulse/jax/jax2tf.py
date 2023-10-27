@@ -147,7 +147,7 @@ def tree_ensemble_classifier(x,
 
   res = tf.py_function(func=lambda x1: tf.constant(jnp.arange(1, count_out)), inp=[x], Tout=tf.TensorSpec(shape=(2, count_out), dtype=tf.float32), name="TreeEnsembleClassifier")
   res = tf.reshape(res, [1, count_out])
-  return tf.nn.softmax(res)
+  return res
 
 tf_impl_no_xla[tree_classifier_p] = tree_ensemble_classifier
 
