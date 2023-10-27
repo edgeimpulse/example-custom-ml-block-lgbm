@@ -103,7 +103,10 @@ def main_function():
 
     try:
         print('Converting to TensorFlow Lite...')
-        lgbm = edgeimpulse.jax.lgbm.LGBM(clf, [1, num_features], num_classes)
+        if num_classes == 2:
+            lgbm = edgeimpulse.jax.lgbm.LGBM(clf, [1, num_features], 1)
+        else:
+            lgbm = edgeimpulse.jax.lgbm.LGBM(clf, [1, num_features], num_classes)
 
         def pred_jax(x):
             return lgbm.predict(x)
