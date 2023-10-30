@@ -83,6 +83,7 @@ def main_function():
 
     if num_classes == 2:
         clf = lgb.LGBMClassifier(num_iterations=num_iterations, max_depth=max_depth, objective='binary')
+        num_classes = 1
     else:
         clf = lgb.LGBMClassifier(num_iterations=num_iterations, max_depth=max_depth)
 
@@ -103,10 +104,7 @@ def main_function():
 
     try:
         print('Converting to TensorFlow Lite...')
-        if num_classes == 2:
-            lgbm = edgeimpulse.jax.lgbm.LGBM(clf, [1, num_features], 1)
-        else:
-            lgbm = edgeimpulse.jax.lgbm.LGBM(clf, [1, num_features], num_classes)
+        lgbm = edgeimpulse.jax.lgbm.LGBM(clf, [1, num_features], num_classes)
 
         def pred_jax(x):
             return lgbm.predict(x)
@@ -117,7 +115,7 @@ def main_function():
                                         input_signature=[
                                             tf.TensorSpec(shape=[1, num_features], dtype=tf.float32, name='input')
                                         ],
-                                        output_signature=[1, 1])
+                                        output_signature=[1, num_classes])
         print('Converting to TensorFlow Lite OK')
         print('')
     except Exception as e:
