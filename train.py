@@ -73,8 +73,12 @@ def main_function():
 
     num_iterations = args.num_iterations or 10
     max_depth = args.max_depth or 20
+    num_features = MODEL_INPUT_SHAPE[0]
+    num_classes = len(input.classes)
     print('Num. iterations: ' + str(num_iterations))
     print('Max. depth: ' + str(max_depth))
+    print('num features: ' + str(num_features))
+    print('num classes: ' + str(num_classes))
 
     clf = lgb.LGBMClassifier(num_iterations=num_iterations, max_depth=max_depth)
     clf.fit(X_train, Y_train)
@@ -89,36 +93,10 @@ def main_function():
     print(f'Accuracy (validation set): {num_correct / len(Y_test)}')
 
     clf = clf.booster_
-    num_features = MODEL_INPUT_SHAPE[0]
-    num_classes = len(input.classes)
-    print('num features: ' + str(num_features))
-    print('num classes: ' + str(num_classes))
 
-    file_float32 = os.path.join(args.out_directory, 'model.tflite')
-
-    try:
-        print('Converting to TensorFlow Lite...')
-        lgbm = edgeimpulse.jax.lgbm.LGBM(clf, [1, num_features], num_classes)
-
-        def pred_jax(x):
-            return lgbm.predict(x)
-
-        edgeimpulse.jax.convert.convert(fun=pred_jax,
-                                        model_path=file_float32,
-                                        lgbm=lgbm,
-                                        input_signature=[
-                                            tf.TensorSpec(shape=[1, num_features], dtype=tf.float32, name='input')
-                                        ],
-                                        output_signature=[1, num_classes])
-        print('Converting to TensorFlow Lite OK')
-        print('')
-    except Exception as e:
-        if (os.path.exists(file_float32)):
-            os.unlink(file_float32)
-        print('WARN: Failed to convert to TensorFlow Lite:', e)
-        print('')
-        exit(1)
-
+    print('Saving LGBM model...')
+    file_lgbm = os.path.join(args.out_directory, 'model.txt')
+    clf.save_model(file_lgbm)
 
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, exit_gracefully)
