@@ -80,7 +80,11 @@ def main_function():
     print('num features: ' + str(num_features))
     print('num classes: ' + str(num_classes))
 
-    clf = lgb.LGBMClassifier(num_iterations=num_iterations, max_depth=max_depth)
+    clf = None
+    if num_classes == 2:
+        clf = lgb.LGBMClassifier(num_iterations=num_iterations, max_depth=max_depth, objective='binary')
+    else:
+        clf = lgb.LGBMClassifier(num_iterations=num_iterations, max_depth=max_depth)
     clf.fit(X_train, Y_train)
 
     print(' ')
