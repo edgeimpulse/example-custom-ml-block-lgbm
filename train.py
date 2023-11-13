@@ -3,6 +3,7 @@ import lightgbm as lgb
 import numpy as np
 import sys, os, signal, random, time, argparse
 import logging, threading
+from sklearn import metrics
 
 sys.path.append('./resources/libraries')
 import ei_tensorflow.training
@@ -61,35 +62,69 @@ def main_function():
     print('')
     print('Training LGBM model...')
 
-    Y_train = np.argmax(Y_train, axis=1)
-    Y_test = np.argmax(Y_test, axis=1)
+    if input.mode == 'classification':
+        Y_train = np.argmax(Y_train, axis=1)
+        Y_test = np.argmax(Y_test, axis=1)
 
     num_iterations = args.num_iterations or 10
     max_depth = args.max_depth or 20
     num_features = MODEL_INPUT_SHAPE[0]
     num_classes = len(input.classes)
+
     print('Num. iterations: ' + str(num_iterations))
     print('Max. depth: ' + str(max_depth))
     print('num features: ' + str(num_features))
     print('num classes: ' + str(num_classes))
+    print('mode: ' + str(input.mode))
 
-    clf = None
-    if num_classes == 2:
-        clf = lgb.LGBMClassifier(num_iterations=num_iterations, max_depth=max_depth, objective='binary')
+    dtrain = lgb.Dataset(X_train, label=Y_train)
+    dval = lgb.Dataset(X_test, label=Y_test)
+
+    params = None
+    if input.mode == 'regression':
+        params = {
+            "objective": "regression",
+            "num_classes": 1
+        }
     else:
-        clf = lgb.LGBMClassifier(num_iterations=num_iterations, max_depth=max_depth)
-    clf.fit(X_train, Y_train)
+        if num_classes == 2:
+            params = {
+                "objective": "binary",
+                "num_classes": 1
+            }
+        else:
+            params = {
+                "objective": "multiclass",
+                "num_classes": num_classes
+            }
+
+    clf = lgb.train(
+        params,
+        dtrain,
+        valid_sets=[dtrain, dval],
+        callbacks=[lgb.log_evaluation()]
+    )
 
     print(' ')
     print('Calculating LGBM random forest accuracy...')
-    num_correct = 0
-    for idx in range(len(Y_test)):
-        pred = clf.predict(X_test[idx].reshape(1, -1))
-        if Y_test[idx] == pred[0]:
-            num_correct += 1
-    print(f'Accuracy (validation set): {num_correct / len(Y_test)}')
 
-    clf = clf.booster_
+    if input.mode == 'regression':
+        predicted_y = clf.predict(X_test)
+        print('r^2: ' + str(metrics.r2_score(Y_test, predicted_y)))
+        print('mse: ' + str(metrics.mean_squared_error(Y_test, predicted_y)))
+        print('log(mse): ' + str(metrics.mean_squared_log_error(Y_test, predicted_y)))
+    else:
+        num_correct = 0
+        for idx in range(len(Y_test)):
+            pred = clf.predict(X_test[idx].reshape(1, -1))
+            if num_classes == 2:
+                if Y_test[idx] == int(round(pred[0])):
+                    num_correct += 1
+            else:
+                pred = np.argmax(pred, axis=1)
+                if Y_test[idx] == pred[0]:
+                    num_correct += 1
+        print(f'Accuracy (validation set): {num_correct / len(Y_test)}')
 
     print('Saving LGBM model...')
     file_lgbm = os.path.join(args.out_directory, 'model.txt')
