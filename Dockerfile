@@ -27,18 +27,13 @@ COPY dependencies/install_tensorflow.sh install_tensorflow.sh
 RUN /bin/bash install_tensorflow.sh && \
     rm install_tensorflow.sh
 
-# Install jaxlib (separate script as this requires a different command on M1 Macs)
-COPY dependencies/install_jaxlib.sh install_jaxlib.sh
-RUN /bin/bash install_jaxlib.sh && \
-    rm install_jaxlib.sh
-
 RUN apt install -y libgomp1
 
 # Copy other Python requirements in and install them
 COPY requirements.txt ./
-RUN pip3 install --no-cache-dir -r requirements.txt
-#RUN --mount=type=cache,target=/root/.cache/pip \
-#    pip3 install -r requirements.txt
+#RUN pip3 install --no-cache-dir -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install -r requirements.txt
 
 ENV PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 
@@ -47,16 +42,3 @@ COPY . ./
 
 ENTRYPOINT [ "python3", "train.py" ]
 
-# FROM public.ecr.aws/g7a8t7v6/jobs-container-keras-export-base:b7c2045436bab937c93d70e93f2658bbc42c88ab
-#
-# WORKDIR /scripts
-#
-# # Install extra dependencies here
-# COPY requirements.txt ./
-# RUN /app/keras/.venv/bin/pip3 install --no-cache-dir -r requirements.txt
-#
-# # Copy all files to the home directory
-# COPY . ./
-
-# The train command (we run this from the keras venv, which has all dependencies)
-#ENTRYPOINT [ "./run-python-with-venv.sh", "keras", "train.py" ]
