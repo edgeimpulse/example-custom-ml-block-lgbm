@@ -22,6 +22,8 @@ parser.add_argument('--data-directory', type=str, required=True,
 parser.add_argument('--out-directory', type=str, required=True,
                     help='Where to write the data')
 
+parser.add_argument('--learning-rate', type=float, required=False,
+                    help='Step size shrinkage used in update to prevents overfitting.')
 parser.add_argument('--num-iterations', type=int, required=False,
                     help='Number of training cycles')
 parser.add_argument('--max-depth', type=int, required=False,
@@ -70,9 +72,11 @@ def main_function():
     max_depth = args.max_depth or 20
     num_features = MODEL_INPUT_SHAPE[0]
     num_classes = len(input.classes)
+    learning_rate = args.learning_rate or 0.3
 
     print('Num. iterations: ' + str(num_iterations))
     print('Max. depth: ' + str(max_depth))
+    print('Learning rate: ' + str(learning_rate))
     print('num features: ' + str(num_features))
     print('num classes: ' + str(num_classes))
     print('mode: ' + str(input.mode))
@@ -97,6 +101,8 @@ def main_function():
                 "objective": "multiclass",
                 "num_classes": num_classes
             }
+
+    params['learning_rate'] = learning_rate
 
     clf = lgb.train(
         params,
