@@ -16,4 +16,39 @@
     "type": "int",
     "help": "Limit the max depth for tree model. This is used to deal with over-fitting when the dataset is small.",
     "param": "max-depth"
+}, {
+    "name": "L2",
+    "value": "0.0",
+    "type": "float",
+    "help": "L2 regularization term on weights. Increasing this value will make model more conservative.",
+    "param": "l2",
+    "section": "advanced"
+}, {
+    "name": "L1",
+    "value": "0.0",
+    "type": "float",
+    "help": "L1 regularization term on weights. Increasing this value will make model more conservative.",
+    "param": "l1",
+    "section": "advanced"
+}, {
+    "name": "Num. leaves",
+    "value": "0",
+    "type": "int",
+    "help": "Maximum number of nodes to be added.",
+    "param": "Num-leaves",
+    "section": "advanced"
+}, {
+    "name": "Min. child weight",
+    "value": "0.001",
+    "type": "float",
+    "help": "Minimum sum of instance weight (hessian) needed in a child.",
+    "param": "min-child-weight",
+    "section": "advanced"
+}, {
+    "name": "Feature fraction",
+    "value": "1.0",
+    "type": "float",
+    "help": "Subsample ratio of the training instances.",
+    "param": "feature-fraction",
+    "section": "advanced"
 }]

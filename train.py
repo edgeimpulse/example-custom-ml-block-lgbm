@@ -22,12 +22,23 @@ parser.add_argument('--data-directory', type=str, required=True,
 parser.add_argument('--out-directory', type=str, required=True,
                     help='Where to write the data')
 
-parser.add_argument('--learning-rate', type=float, required=False,
+parser.add_argument('--learning-rate', type=float, required=False, default=0.1,
                     help='Step size shrinkage used in update to prevents overfitting.')
-parser.add_argument('--num-iterations', type=int, required=False,
+parser.add_argument('--num-iterations', type=int, required=False, default=10,
                     help='Number of training cycles')
-parser.add_argument('--max-depth', type=int, required=False,
+parser.add_argument('--max-depth', type=int, required=False, default=-1,
                     help='Maximum depth')
+
+parser.add_argument('--l2', type=float, required=False, default=0.0,
+                    help='L2 regularization term on weights. Increasing this value will make model more conservative.')
+parser.add_argument('--l1', type=float, required=False, default=0.0,
+                    help='L1 regularization term on weights. Increasing this value will make model more conservative.')
+parser.add_argument('--max-leaves', type=int, required=False,
+                    help='Maximum number of nodes to be added.')
+parser.add_argument('--min-child-weight', type=float, required=False, default=0.001,
+                    help='Minimum sum of instance weight (hessian) needed in a child.')
+parser.add_argument('--feature-fraction', type=float, required=False, default=1.0,
+                    help='Subsample ratio of the training instances.')
 
 args, unknown = parser.parse_known_args()
 
@@ -68,15 +79,9 @@ def main_function():
         Y_train = np.argmax(Y_train, axis=1)
         Y_test = np.argmax(Y_test, axis=1)
 
-    num_iterations = args.num_iterations or 10
-    max_depth = args.max_depth or 20
     num_features = MODEL_INPUT_SHAPE[0]
     num_classes = len(input.classes)
-    learning_rate = args.learning_rate or 0.3
 
-    print('Num. iterations: ' + str(num_iterations))
-    print('Max. depth: ' + str(max_depth))
-    print('Learning rate: ' + str(learning_rate))
     print('num features: ' + str(num_features))
     print('num classes: ' + str(num_classes))
     print('mode: ' + str(input.mode))
@@ -102,7 +107,17 @@ def main_function():
                 "num_classes": num_classes
             }
 
-    params['learning_rate'] = learning_rate
+    params['learning_rate'] = args.learning_rate
+    params['max_depth'] = args.max_depth
+    params['lambda_l2'] = args.l2
+    params['lambda_l1'] = args.l1
+    params['min_child_weight'] = args.min_child_weight
+    params['feature_fraction'] = args.feature_fraction
+
+    print('params:')
+    print(params)
+    print(' ')
+    print('Training LGBM random forest...')
 
     clf = lgb.train(
         params,
