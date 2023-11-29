@@ -237,68 +237,40 @@ def compute_performance_object_detection(raw_scores: list, width_height: int,
 
     return info
 
-def run_model(mode: Literal['classification', 'regression', 'object-detection', 'segmentation', 'yolov5', 'yolov5v5-drpai', 'yolox', 'yolov7', 'jax'],
+def run_model(mode: Literal['classification', 'regression', 'object-detection', 'segmentation', 'yolov2-akida', 'yolov5', 'yolov5v5-drpai', 'yolox', 'yolov7', 'jax', 'visual-anomaly'],
               interpreter: Interpreter, item: np.ndarray, specific_input_shape: 'list[int]',
-              image_input_scaling: typing.Optional[Literal['0..1', '0..255', 'torch']],
-              minimum_confidence_rating: float=None, y_data=None, num_classes: int=None):
+              minimum_confidence_rating: float=None, y_data=None, num_classes: int=None, dir_path: str=None):
     """Runs inference with a given model and mode
     """
     if mode == 'object-detection':
         return run_object_detection_inference(interpreter, item, specific_input_shape,
-                                              minimum_confidence_rating, y_data, num_classes,
-                                              image_input_scaling)
+                                              minimum_confidence_rating, y_data, num_classes)
     elif mode == 'segmentation':
         return run_segmentation_inference(interpreter, item, specific_input_shape,
-                                          minimum_confidence_rating, y_data,
-                                          image_input_scaling)
+                                          minimum_confidence_rating, y_data)
+    elif mode == 'yolov2-akida':
+        return run_akida_yolov2_inference(interpreter, item, specific_input_shape,
+                                    minimum_confidence_rating, y_data, num_classes, dir_path)
     elif mode == 'yolov5':
         return run_yolov5_inference(interpreter, item, specific_input_shape, 6,
-                                    minimum_confidence_rating, y_data, num_classes,
-                                    image_input_scaling)
+                                    minimum_confidence_rating, y_data, num_classes)
     elif mode == 'yolov5v5-drpai':
         return run_yolov5_inference(interpreter, item, specific_input_shape, 5,
-                                    minimum_confidence_rating, y_data, num_classes,
-                                    image_input_scaling)
+                                    minimum_confidence_rating, y_data, num_classes)
     elif mode == 'yolox':
         return run_yolox_inference(interpreter, item, specific_input_shape,
-                                    minimum_confidence_rating, y_data, num_classes,
-                                    image_input_scaling)
+                                    minimum_confidence_rating, y_data, num_classes)
     elif mode == 'yolov7':
         return run_yolov7_inference(interpreter, item, specific_input_shape,
-                                    minimum_confidence_rating, y_data, num_classes,
-                                    image_input_scaling)
-    elif mode == 'classification' or mode == 'regression' or mode == 'jax':
-        return run_vector_inference(interpreter, item, specific_input_shape, image_input_scaling)
+                                    minimum_confidence_rating, y_data, num_classes)
+    elif mode == 'classification' or mode == 'regression' or mode == 'jax' or mode == 'visual-anomaly':
+        return run_vector_inference(interpreter, item, specific_input_shape)
     else:
         raise ValueError('Invalid mode "' + mode + '"')
 
-def invoke(interpreter: Interpreter, item: np.ndarray, specific_input_shape: 'list[int]',
-           image_input_scaling: typing.Optional[Literal['0..1', '0..255', 'torch']]):
+def invoke(interpreter: Interpreter, item: np.ndarray, specific_input_shape: 'list[int]'):
     """Invokes the Python TF Lite interpreter with a given input
     """
-
-    if image_input_scaling and len(specific_input_shape) == 3:
-        if image_input_scaling == '0..1':
-            pass # already in the right format
-        elif image_input_scaling == '0..255':
-            item = np.copy(item)
-            item = np.reshape(item, specific_input_shape)
-
-            item = item * 255
-
-        elif image_input_scaling == 'torch':
-            item = np.copy(item)
-            item = np.reshape(item, specific_input_shape)
-
-            mean = [0.485, 0.456, 0.406]
-            std = [0.229, 0.224, 0.225]
-
-            item[:, :, 0] -= mean[0]
-            item[:, :, 1] -= mean[1]
-            item[:, :, 2] -= mean[2]
-            item[:, :, 0] /= std[0]
-            item[:, :, 1] /= std[1]
-            item[:, :, 2] /= std[2]
 
     input_details = interpreter.get_input_details()
     output_details = interpreter.get_output_details()
@@ -326,16 +298,14 @@ def invoke(interpreter: Interpreter, item: np.ndarray, specific_input_shape: 'li
     output = np.array(output)
     return output, output_details
 
-def run_vector_inference(interpreter: Interpreter, item: np.ndarray, specific_input_shape: 'list[int]',
-                         image_input_scaling: typing.Optional[Literal['0..1', '0..255', 'torch']]):
+def run_vector_inference(interpreter: Interpreter, item: np.ndarray, specific_input_shape: 'list[int]'):
     """Runs inference that produces a vector output (classification or regression)
     """
-    output, output_details = invoke(interpreter, item, specific_input_shape, image_input_scaling)
+    output, output_details = invoke(interpreter, item, specific_input_shape)
     return output
 
 def run_object_detection_inference(interpreter: Interpreter, item: np.ndarray, specific_input_shape: 'list[int]',
-                                   minimum_confidence_rating: float, y_data, num_classes,
-                                   image_input_scaling: typing.Optional[Literal['0..1', '0..255', 'torch']]):
+                                   minimum_confidence_rating: float, y_data, num_classes):
     """Runs inference that produces an object detection output
     """
     width, height, _channels = specific_input_shape
@@ -343,7 +313,7 @@ def run_object_detection_inference(interpreter: Interpreter, item: np.ndarray, s
         raise Exception(f"Only square inputs are supported; not {specific_input_shape}")
     width_height = width
 
-    output, output_details = invoke(interpreter, item, specific_input_shape, image_input_scaling)
+    output, output_details = invoke(interpreter, item, specific_input_shape)
     if not y_data:
         raise ValueError('y_data must be provided for object detection')
     if not num_classes:
@@ -355,8 +325,7 @@ def run_object_detection_inference(interpreter: Interpreter, item: np.ndarray, s
     return scores
 
 def run_segmentation_inference(interpreter: Interpreter, item: np.ndarray, specific_input_shape: 'list[int]',
-                               minimum_confidence_rating: float, y_data: list,
-                               image_input_scaling: typing.Optional[Literal['0..1', '0..255', 'torch']]):
+                               minimum_confidence_rating: float, y_data: list):
     """Runs inference that produces an object detection output
     """
 
@@ -370,7 +339,7 @@ def run_segmentation_inference(interpreter: Interpreter, item: np.ndarray, speci
         raise Exception(f"Only square input is supported; not {specific_input_shape}")
     input_width_height = width
 
-    output, output_details = invoke(interpreter, item, specific_input_shape, image_input_scaling)
+    output, output_details = invoke(interpreter, item, specific_input_shape)
 
     _batch, width, height, num_classes_including_background = output_details[0]['shape']
     if width != height:
@@ -448,9 +417,31 @@ def yolov5_detect(output_data):  # input = interpreter, output is boxes(xyxy), c
 
     return xyxy, classes, scores  # output is boxes(x,y,x,y), classes(int), scores(float) [predictions length]
 
+def run_akida_yolov2_inference(interpreter: Interpreter, item: np.ndarray, specific_input_shape: 'list[int]',
+                          minimum_confidence_rating: float, y_data: list, num_classes: int, output_directory: str):
+    import pickle
+    if not y_data:
+        raise ValueError('y_data must be provided for object detection')
+    if not minimum_confidence_rating:
+        raise ValueError('minimum_confidence_rating must be provided for object detection')
+
+    width, height, _channels = specific_input_shape
+    if width != height:
+        raise Exception(f"Only square input is supported; not {specific_input_shape}")
+    input_width_height = width
+
+    with open(os.path.join(output_directory, "akida_yolov2_anchors.pkl"), 'rb') as handle:
+        anchors = pickle.load(handle)
+
+    output, output_details = invoke(interpreter, item, specific_input_shape)
+    h, w, c = output.shape
+    output = output.reshape((h, w, len(anchors), 4 + 1 + num_classes))
+    raw_scores = ei_tensorflow.brainchip.model.process_output_yolov2(output, (width, height), num_classes, anchors)
+
+    return compute_performance_object_detection(raw_scores, input_width_height, y_data, num_classes)
+
 def run_yolov5_inference(interpreter: Interpreter, item: np.ndarray, specific_input_shape: 'list[int]',
-                          version: int, minimum_confidence_rating: float, y_data: list, num_classes,
-                          image_input_scaling: typing.Optional[Literal['0..1', '0..255', 'torch']]):
+                          version: int, minimum_confidence_rating: float, y_data: list, num_classes):
     """Runs inference that produces an object detection output
     """
     if not y_data:
@@ -463,7 +454,7 @@ def run_yolov5_inference(interpreter: Interpreter, item: np.ndarray, specific_in
         raise Exception(f"Only square input is supported; not {specific_input_shape}")
     input_width_height = width
 
-    output, output_details = invoke(interpreter, item, specific_input_shape, image_input_scaling)
+    output, output_details = invoke(interpreter, item, specific_input_shape)
     # expects to have batch dim here
     output = np.expand_dims(output, axis=0)
 
@@ -472,8 +463,7 @@ def run_yolov5_inference(interpreter: Interpreter, item: np.ndarray, specific_in
     return compute_performance_object_detection(raw_scores, input_width_height, y_data, num_classes)
 
 def run_yolox_inference(interpreter: Interpreter, item: np.ndarray, specific_input_shape: 'list[int]',
-                        minimum_confidence_rating: float, y_data: list, num_classes,
-                        image_input_scaling: typing.Optional[Literal['0..1', '0..255', 'torch']]):
+                        minimum_confidence_rating: float, y_data: list, num_classes):
     """Runs inference that produces an object detection output
     """
     if not y_data:
@@ -486,7 +476,7 @@ def run_yolox_inference(interpreter: Interpreter, item: np.ndarray, specific_inp
         raise Exception(f"Only square input is supported; not {specific_input_shape}")
     input_width_height = width
 
-    output, output_details = invoke(interpreter, item, specific_input_shape, image_input_scaling)
+    output, output_details = invoke(interpreter, item, specific_input_shape)
     # expects to have batch dim here
     output = np.expand_dims(output, axis=0)
 
@@ -621,8 +611,7 @@ def process_output_yolox(output_data, img_size, minimum_confidence_rating=None):
     return nms_scores
 
 def run_yolov7_inference(interpreter: Interpreter, item: np.ndarray, specific_input_shape: 'list[int]',
-                         minimum_confidence_rating: float, y_data: list, num_classes,
-                         image_input_scaling: typing.Optional[Literal['0..1', '0..255', 'torch']]):
+                         minimum_confidence_rating: float, y_data: list, num_classes):
     """Runs inference that produces an object detection output
     """
     if not y_data:
@@ -635,7 +624,7 @@ def run_yolov7_inference(interpreter: Interpreter, item: np.ndarray, specific_in
         raise Exception(f"Only square input is supported; not {specific_input_shape}")
     input_width_height = width
 
-    output, output_details = invoke(interpreter, item, specific_input_shape, image_input_scaling)
+    output, output_details = invoke(interpreter, item, specific_input_shape)
 
     raw_scores = process_output_yolov7(output, width=width, height=height, minimum_confidence_rating=minimum_confidence_rating)
     return compute_performance_object_detection(raw_scores, input_width_height, y_data, num_classes)
@@ -705,10 +694,9 @@ def map_test_label_to_train(test_ix, train_labels, test_labels, zero_index=True)
     return train_labels.index(actual_label) + adjust_index
 
 def classify_keras(input_x_file, input_y_file, mode, output_file, dir_path,
-                   model_path, specific_input_shape, use_tflite, layer_input_name,
+                   model_path, model_head_path, specific_input_shape, use_tflite, layer_input_name,
                    layer_output_name, class_names_training, class_names_testing,
-                   minimum_confidence_rating,
-                   image_input_scaling):
+                   minimum_confidence_rating):
 
     gt_y = None
 
@@ -739,15 +727,41 @@ def classify_keras(input_x_file, input_y_file, mode, output_file, dir_path,
     if use_tflite:
         interpreter = prepare_interpreter(dir_path, model_path)
 
+        if model_head_path:
+            interpreter_head = prepare_interpreter(dir_path, model_head_path)
+            scorer_input_details = interpreter_head.get_input_details()
+            scorer_shape = scorer_input_details[0]['shape'][1:]
+
         for i, item in enumerate(input):
-            scores = run_model(mode=mode,
-                               interpreter=interpreter,
-                               item=item,
-                               specific_input_shape=specific_input_shape,
-                               minimum_confidence_rating=minimum_confidence_rating,
-                               y_data=gt_y[i] if gt_y != None else None,
-                               num_classes=len(class_names_training),
-                               image_input_scaling=image_input_scaling)
+            if model_head_path:
+                features = run_model(mode=mode,
+                                     interpreter=interpreter,
+                                     item=item,
+                                     specific_input_shape=specific_input_shape,
+                                     minimum_confidence_rating=minimum_confidence_rating,
+                                     y_data=gt_y[i] if gt_y != None else None,
+                                     num_classes=len(class_names_training),
+                                     dir_path=dir_path)
+
+                features = features.astype(np.float32)
+                scores = run_model(mode=mode,
+                                     interpreter=interpreter_head,
+                                     item=features,
+                                     specific_input_shape=scorer_shape,
+                                     minimum_confidence_rating=minimum_confidence_rating,
+                                     y_data=None,
+                                     num_classes=len(class_names_training),
+                                     dir_path=dir_path)
+            else:
+                scores = run_model(mode=mode,
+                                   interpreter=interpreter,
+                                   item=item,
+                                   specific_input_shape=specific_input_shape,
+                                   minimum_confidence_rating=minimum_confidence_rating,
+                                   y_data=gt_y[i] if gt_y != None else None,
+                                   num_classes=len(class_names_training),
+                                   dir_path=dir_path)
+
             pred_y.append(np.array(scores).tolist())
             # Log a message if enough time has elapsed
             current_time = time.time()

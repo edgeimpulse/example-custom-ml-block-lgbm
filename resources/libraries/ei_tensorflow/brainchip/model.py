@@ -51,7 +51,7 @@ def load_akida_model(path):
     return akida.Model(path)
 
 def make_predictions(mode, model_path, validation_dataset,
-                    Y_test, train_dataset, Y_train, test_dataset, Y_real_test):
+                    Y_test, train_dataset, Y_train, test_dataset, Y_real_test, num_classes, output_directory):
     prediction_train = None
     prediction_test = None
 
@@ -63,6 +63,8 @@ def make_predictions(mode, model_path, validation_dataset,
             prediction_test = predict(model_path, test_dataset, len(Y_real_test))
     elif mode == 'segmentation':
         prediction = predict_segmentation(model_path, validation_dataset, len(Y_test))
+    elif mode == 'yolov2-akida':
+        prediction = akida_predict_yolov2(model_path, validation_dataset, Y_test, len(Y_test), num_classes, output_directory)
     else:
         raise Exception('Unsupported mode for profiling: ' + mode)
 
@@ -83,6 +85,36 @@ def process_input(data, input_is_4bits = False):
         data = np.uint8(data)
 
     return data
+
+def akida_predict_yolov2(model_path, validation_dataset, Y_test, dataset_length, num_classes, output_directory):
+    import pickle
+
+    model = load_akida_model(model_path)
+    input_shape = model.input_shape
+    width = input_shape[0]
+    height = input_shape[1]
+    with open(os.path.join(output_directory, "akida_yolov2_anchors.pkl"), 'rb') as handle:
+        anchors = pickle.load(handle)
+
+    last_log = time.time()
+
+    pred_y = []
+    for batch, _ in validation_dataset.take(-1):
+        for item in batch:
+            item = (item * 255)
+            item = np.array(item)
+            output = model.predict(item.astype('uint8'))[0]
+            h, w, c = output.shape
+            output = output.reshape((h, w, len(anchors), 4 + 1 + num_classes))
+            rect_label_scores = process_output_yolov2(output, (width, height), 2, anchors)
+            pred_y.append(rect_label_scores)
+            current_time = time.time()
+            if last_log + 10 < current_time:
+                print('Profiling {0}% done'.format(int(100 / dataset_length * (len(pred_y) - 1))), flush=True)
+                last_log = current_time
+
+    result = np.array(pred_y)
+    return result
 
 def predict_segmentation(model_path, validation_dataset, dataset_length):
     """Runs an Akida model across a set of inputs"""
@@ -289,3 +321,95 @@ def get_hardware_utilization(model_file):
         nodes += 1
 
     return (program_size, total_nps, nodes)
+
+def convert_bbox_to_anchors(Y, image_width, image_height):
+    anchors = []
+
+    for ix in range(0, len(Y)):
+        # Create one data dictionary for each image
+        data = {"boxes": []}
+        labels = Y[ix]['boundingBoxes']
+
+        # TODO: last value (3) is image_channels. Seems to be not used in the processing of YOLOv2 output
+        data['image_shape'] = (image_width, image_height, 3)
+        labels_text = []
+        # All the labels found in one image
+        for l in labels:
+            # Dimensions of one bounding box:
+            x = l['x']
+            y = l['y']
+            w = l['w']
+            h = l['h']
+
+            # Class x_center y_center width height
+            x_center = (x + (w / 2)) / image_width
+            y_center = (y + (h / 2)) / image_height
+            width = w / image_width
+            height = h / image_height
+
+            # Dimensions of one bounding box as required by Brainchip
+            x1 = x
+            x2 = x1 + w
+            y1 = y
+            y2 = y1 + h
+
+            # Create another dictionary to hold bounding box data and labels
+            box = {}
+
+            box['label'] = str(l['label'] - 1)
+            box['x1'] = int(round(float(x1)))
+            box['y1'] = int(round(float(y1)))
+            box['x2'] = int(round(float(x2)))
+            box['y2'] = int(round(float(y2)))
+
+            # After the above 5 pieces of info are added to the key, append to "box"
+            # starts again if more than one bounding box + label in one image
+            # TODO: is len(box) different than 5 anytime?
+            if len(box) == 5:
+              data["boxes"].append(box)
+
+        # If there are any bounding boxes located in the image, append to anchors, otherwise skip append  
+        if len(data["boxes"]) != 0:
+            anchors.append(data)
+
+    return(anchors)
+
+def process_output_yolov2(output_data, img_shape, num_classes, anchors, minimum_confidence_rating=None):
+    from akida_models.detection.processing import decode_output
+    from ei_tensorflow.inference import object_detection_nms
+    # OUTPUT example: type: float32[1,7,7,5,7]
+    # output: (N, grid_height, grid_width, anchors_box, 4 + 1 + num_classes)
+    # The model output can be reshaped to a more natural shape of:
+    # (grid_height, grid_width, anchors_box, 4 + 1 + num_classes)
+    # where the “4 + 1” term represents the coordinates of the estimated bounding boxes
+    # (top left x, top left y, width and height) and a confidence score. In other words,
+    # the output channels are actually grouped by anchor boxes, and in each group one channel provides
+    # either a coordinate, a global confidence score or a class confidence score.
+    # This process is done automatically in the decode_output function.
+
+    raw_width = img_shape[0]
+    raw_height = img_shape[1]
+    max_box_per_image = 10
+    pred_boxes = decode_output(output_data, anchors, num_classes)
+
+    # get lists of scores, labels and boxes
+    score = np.array([box.get_score() for box in pred_boxes])
+    pred_labels = np.array([box.get_label() for box in pred_boxes])
+    if len(pred_boxes) > 0:
+        # print(f"PRED BOX    ::: {pred_boxes}")
+        pred_boxes = np.array([[
+            box.x1 * raw_width, box.y1 * raw_height, box.x2 * raw_width,
+            box.y2 * raw_height
+        ] for box in pred_boxes])
+    else:
+        pred_boxes = np.array([[]])
+
+    # sort the boxes and the labels according to scores
+    score_sort = np.argsort(-score)
+    pred_labels = pred_labels[score_sort]
+    pred_boxes = pred_boxes[score_sort]
+
+    raw_scores = list(zip(pred_boxes, pred_labels, score))
+    nms_scores = object_detection_nms(raw_scores, raw_width, 0.4)
+
+    return nms_scores

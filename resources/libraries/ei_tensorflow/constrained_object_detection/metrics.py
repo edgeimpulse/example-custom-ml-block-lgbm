@@ -109,7 +109,7 @@ class CentroidScoring(Callback):
     def on_epoch_end(self, epoch, logs):
         # run model over validation data. recall; model is just logits so need
         # to run softmax before conversion.
-        y_pred = self.model.predict(self.dataset)
+        y_pred = self.model.predict(self.dataset, verbose=0)
         y_pred = softmax(y_pred, axis=-1)
 
         # convert to bounding box label scores for near centroid matching.

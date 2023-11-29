@@ -9,6 +9,12 @@ def bbox_to_segmentation(*args, validation=False):
         The function is called by Expert Mode code, so we use args/kwargs to keep the parameters flexible
         in case of any changes.
     """
+
+    # we should never use validation=True, but it's possible existing expert mode code does.
+    if validation:
+        print(support_message())
+        exit(1)
+
     # This function was refactored to have different behavior and arguments, but is called from
     # Expert Mode. We need to catch any calls from legacy code and give the user help in porting
     # to the new version.
@@ -68,16 +74,21 @@ def support_message():
 Important: Changes required
 ---------------------------
 
-We've made some changes to improve performance. Please make the following updates to your Expert Mode code:
+We've made some changes to improve performance and work around potential errors on GPU. Please make the following updates to your Expert Mode code:
 
 Step 1: Replace the lines where `train_segmentation_dataset` and `validation_segmentation_dataset` are defined with the following code:
 
-        train_segmentation_dataset = train_dataset.map(dataset.bbox_to_segmentation(
-            output_width_height, num_classes_with_background)).batch(32, drop_remainder=False).prefetch(1)
-        validation_segmentation_dataset = validation_dataset.map(dataset.bbox_to_segmentation(
-            output_width_height, num_classes_with_background, validation=True)).batch(32, drop_remainder=False).prefetch(1)
+    def as_segmentation(ds):
+        return ds.map(dataset.bbox_to_segmentation(output_width_height, num_classes_with_background)
+                      ).batch(32, drop_remainder=False).prefetch(1)
+    train_segmentation_dataset = as_segmentation(train_dataset)
+    validation_segmentation_dataset = as_segmentation(validation_dataset)
+    validation_dataset_for_callback = validation_dataset.batch(32, drop_remainder=False).prefetch(1)
 
-Step 2: In the code after those lines, replace any usage of `validation_dataset` with `validation_segmentation_dataset`.
+Step 2: Change the Centroid callback to use 'validation_dataset_for_callback'
+
+    callbacks.append(metrics.CentroidScoring(validation_dataset_for_callback,
+                                             output_width_height, num_classes_with_background))
 
 After making those changes your model should train as before.
 

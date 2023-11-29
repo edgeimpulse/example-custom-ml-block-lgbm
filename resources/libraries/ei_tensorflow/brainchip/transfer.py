@@ -5,7 +5,7 @@
 import math, random
 import tensorflow as tf
 from tensorflow.keras.layers import Activation, Dropout, Flatten, Reshape
-from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.optimizers.legacy import Adam
 
 from keras import Model
 from keras.layers import Activation, Dropout, Reshape, Flatten
@@ -15,8 +15,6 @@ from akida_models import akidanet_imagenet
 
 from ei_tensorflow import training
 import cnn2snn
-
-BATCH_SIZE = 32
 
 #! Implements the data augmentation policy
 def augmentation_function(input_shape: tuple):
@@ -57,7 +55,9 @@ def train(train_dataset: tf.data.Dataset,
           edge_learning_function=None,
           additional_classes=None,
           neurons_per_class=None,
-          X_train=None):
+          X_train=None,
+          batch_size=None,
+          ensure_determinism=False):
     #! Create a quantized base model without top layers
     base_model = akidanet_imagenet(input_shape=input_shape,
                                 classes=num_classes,
@@ -93,13 +93,20 @@ def train(train_dataset: tf.data.Dataset,
     opt = Adam(learning_rate=learning_rate)
     model.compile(optimizer=opt, loss='categorical_crossentropy', metrics=['accuracy'])
 
+    # Autotune parallel calls is usually sensible, but can be non-deterministic, so we
+    # allow disabling for integration tests to prevent intermittent fails.
+    parallel_calls_policy = None if ensure_determinism else tf.data.experimental.AUTOTUNE
+
     if data_augmentation:
         train_dataset = train_dataset.map(augmentation_function(input_shape),
-                                          num_parallel_calls=tf.data.AUTOTUNE)
+            num_parallel_calls=parallel_calls_policy)
+    
+    if not ensure_determinism:
+        train_dataset = train_dataset.shuffle(buffer_size=batch_size*4)
 
     #! This controls the batch size, or you can manipulate the tf.data.Dataset objects yourself
-    train_dataset = train_dataset.batch(BATCH_SIZE, drop_remainder=False)
-    validation_dataset = validation_dataset.batch(BATCH_SIZE, drop_remainder=False)
+    train_dataset = train_dataset.batch(batch_size, drop_remainder=False)
+    validation_dataset = validation_dataset.batch(batch_size, drop_remainder=False)
 
     #! Train the neural network
     model.fit(train_dataset, epochs=epochs, validation_data=validation_dataset, verbose=2, callbacks=callbacks)
@@ -107,7 +114,7 @@ def train(train_dataset: tf.data.Dataset,
     print('')
     print('Initial training done.', flush=True)
     print('')
-    
+
     #! Unfreeze the model before QAT
     model.trainable = True
 

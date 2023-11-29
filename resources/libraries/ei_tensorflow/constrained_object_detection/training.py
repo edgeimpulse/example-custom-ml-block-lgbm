@@ -4,14 +4,16 @@
 #########################################################################################
 import os
 import tensorflow as tf
-from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.optimizers.legacy import Adam
 from tensorflow.keras.applications import MobileNetV2
 from tensorflow.keras.layers import BatchNormalization, Conv2D, Softmax, Reshape
 from tensorflow.keras.models import Model
 from ei_tensorflow.constrained_object_detection import models, dataset, metrics, util
+from ei_tensorflow.velo import train_keras_model_with_velo
+from ei_shared.pretrained_weights import get_or_download_pretrained_weights
 import ei_tensorflow.training
-from pathlib import Path
-import requests
+
+WEIGHTS_PREFIX = os.environ.get('WEIGHTS_PREFIX', os.getcwd())
 
 def build_model(input_shape: tuple, weights: str, alpha: float,
                 num_classes: int) -> tf.keras.Model:
@@ -58,7 +60,10 @@ def train(num_classes: int, learning_rate: float, num_epochs: int,
           validation_dataset: tf.data.Dataset,
           best_model_path: str,
           input_shape: tuple,
-          lr_finder: bool = False) -> tf.keras.Model:
+          batch_size: int,
+          lr_finder: bool = False,
+          use_velo: bool = False,
+          ensure_determinism: bool = False) -> tf.keras.Model:
     """ Construct and train a constrained object detection model.
 
     Args:
@@ -76,8 +81,12 @@ def train(num_classes: int, learning_rate: float, num_epochs: int,
         best_model_path: location to save best model path. note: weights
             will be restored from this path based on best val_f1 score.
         input_shape: The shape of the model's input
-        max_training_time_s: Max training time (will exit if est. training time is over the limit)
-        is_enterprise_project: Determines what message we print if training time exceeds
+        batch_size: Training batch size
+        lr_finder: If True, the learning_rate will be replaced with a value
+            found by the learning rate finder.
+        ensure_determinism: If true, functions that may be non-
+            deterministic are disabled (e.g. autotuning prefetch). This
+            should be true in test environments.
     Returns:
         Trained keras model.
 
@@ -93,11 +102,9 @@ def train(num_classes: int, learning_rate: float, num_epochs: int,
     num_classes_with_background = num_classes + 1
 
     # TODO(mat) remove restriction that everything is square
-    input_width_height = None
     width, height, input_num_channels = input_shape
     if width != height:
         raise Exception(f"Only square inputs are supported; not {input_shape}")
-    input_width_height = width
 
     #! Use pretrained weights, if we have them for configured #channels & alpha.
     # NOTE: for FOMO v1 sizing, where we cut MobileNetV2 at block_6_expand_relu,
@@ -105,30 +112,11 @@ def train(num_classes: int, learning_rate: float, num_epochs: int,
     #       for alpha 0.05 or 0.1. as such we just "support" alpha=0.1 for now
     #       and ignore the fact that we have pretrained weights also for 0.05.
     #       !! as we grow the FOMO models this factoid might change !!
-    weights = None
-    if input_num_channels == 1:
-        if alpha == 0.1:
-            weights = "./transfer-learning-weights/edgeimpulse/MobileNetV2.0_1.96x96.grayscale.bsize_64.lr_0_05.epoch_441.val_loss_4.13.val_accuracy_0.2.hdf5"
-        elif alpha == 0.35:
-            weights = "./transfer-learning-weights/edgeimpulse/MobileNetV2.0_35.96x96.grayscale.bsize_64.lr_0_005.epoch_260.val_loss_3.10.val_accuracy_0.35.hdf5"
-    elif input_num_channels == 3:
-        if alpha == 0.1:
-            weights = "./transfer-learning-weights/edgeimpulse/MobileNetV2.0_1.96x96.color.bsize_64.lr_0_05.epoch_498.val_loss_3.85.hdf5"
-        elif alpha == 0.35:
-            weights = "./transfer-learning-weights/keras/mobilenet_v2_weights_tf_dim_ordering_tf_kernels_0.35_96.h5"
-
-    # Explicit check that requested weights are available.
-    if (weights and not os.path.exists(weights)):
-        print(f"Pretrained weights {weights} unavailable; downloading...")
-        p = Path(weights)
-        if not p.exists():
-            if not p.parent.exists():
-                p.parent.mkdir(parents=True)
-            root_url = 'https://cdn.edgeimpulse.com/'
-            weights_data = requests.get(root_url + weights[2:]).content
-            with open(weights, 'wb') as f:
-                f.write(weights_data)
-        print(f"Pretrained weights {weights} unavailable; downloading OK\n")
+    allowed_combinations = [{'num_channels': 1, 'alpha': 0.1},
+                            {'num_channels': 1, 'alpha': 0.35},
+                            {'num_channels': 3, 'alpha': 0.1},
+                            {'num_channels': 3, 'alpha': 0.35}]
+    weights = get_or_download_pretrained_weights(WEIGHTS_PREFIX, input_num_channels, alpha, allowed_combinations)
 
     model = build_model(
         input_shape=input_shape,
@@ -147,11 +135,29 @@ def train(num_classes: int, learning_rate: float, num_epochs: int,
     #! Build weighted cross entropy loss specific to this model size
     weighted_xent = models.construct_weighted_xent_fn(model.output.shape, object_weight)
 
+    # Prefetch with AUTOTUNE is usually sensible, but can be non-deterministic, so we
+    # allow disabling for integration tests to prevent intermittent fails.
+    prefetch_policy = 1 if ensure_determinism else tf.data.experimental.AUTOTUNE
+
+    # Transform both the train and validation datasets to (x, y) segmentation maps
+    # i.e. x=(H, W, channels) and y=(H/8, W/8, num_classes)
+    # we use these for loss calculation during keras.fit
     #! Transform bounding box labels into segmentation maps
-    train_segmentation_dataset = train_dataset.map(dataset.bbox_to_segmentation(
-        output_width_height, num_classes_with_background)).batch(32, drop_remainder=False).prefetch(1)
-    validation_segmentation_dataset = validation_dataset.map(dataset.bbox_to_segmentation(
-        output_width_height, num_classes_with_background, validation=True)).batch(32, drop_remainder=False).prefetch(1)
+    def as_segmentation(ds, shuffle):
+        ds = ds.map(dataset.bbox_to_segmentation(output_width_height, num_classes_with_background))
+        if not ensure_determinism and shuffle:
+            ds = ds.shuffle(buffer_size=batch_size*4)
+        ds = ds.batch(batch_size, drop_remainder=False).prefetch(prefetch_policy)
+        return ds
+
+    train_segmentation_dataset = as_segmentation(train_dataset, True)
+    validation_segmentation_dataset = as_segmentation(validation_dataset, False)
+
+    # Do an additional version of the validation dataset that is passed to the
+    # centroid scoring callback ( which uses (x, (bb, labels)) ) _with_ the mapping
+    validation_dataset_for_callback = (validation_dataset
+        .batch(batch_size, drop_remainder=False)
+        .prefetch(prefetch_policy))
 
     #! Initialise bias of final classifier based on training data prior.
     util.set_classifier_biases_from_dataset(
@@ -160,13 +166,14 @@ def train(num_classes: int, learning_rate: float, num_epochs: int,
     if lr_finder:
         learning_rate = ei_tensorflow.lr_finder.find_lr(model, train_segmentation_dataset, weighted_xent)
 
-    model.compile(loss=weighted_xent,
-                  optimizer=Adam(learning_rate=learning_rate))
+    if not use_velo:
+        model.compile(loss=weighted_xent,
+                    optimizer=Adam(learning_rate=learning_rate))
 
     #! Create callback that will do centroid scoring on end of epoch against
     #! validation data. Include a callback to show % progress in slow cases.
     callbacks = callbacks if callbacks else [] # type: ignore
-    callbacks.append(metrics.CentroidScoring(validation_segmentation_dataset,
+    callbacks.append(metrics.CentroidScoring(validation_dataset_for_callback,
                                              output_width_height, num_classes_with_background))
     callbacks.append(metrics.PrintPercentageTrained(num_epochs))
 
@@ -176,9 +183,19 @@ def train(num_classes: int, learning_rate: float, num_epochs: int,
             monitor='val_f1', save_best_only=True, mode='max',
             save_weights_only=True, verbose=0))
 
-    model.fit(train_segmentation_dataset,
-              validation_data=validation_segmentation_dataset,
-              epochs=num_epochs, callbacks=callbacks, verbose=0)
+    if use_velo:
+        train_keras_model_with_velo(
+            model,
+            train_segmentation_dataset,
+            validation_segmentation_dataset,
+            loss_fn=weighted_xent,
+            num_epochs=num_epochs,
+            callbacks=callbacks
+        )
+    else:
+        model.fit(train_segmentation_dataset,
+                validation_data=validation_segmentation_dataset,
+                epochs=num_epochs, callbacks=callbacks, verbose=0)
 
     #! Restore best weights.
     model.load_weights(best_model_path)

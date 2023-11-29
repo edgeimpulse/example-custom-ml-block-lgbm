@@ -1,25 +1,25 @@
 import sys
 import numpy as np
 
+albumentations_import_err = None
 ALBUMENTATIONS_IMPORTED = True
 try:
     from albumentations import Compose, RandomResizedCrop, Rotate, RandomBrightnessContrast, HorizontalFlip
     from albumentations import BboxParams
 except ImportError as err:
-    print('ERROR: Could not load albumentations library. This is a known issue during unit tests '
-          'on M1 Macs (#3880) and will prevent object detection augmentation from working. \n'
-          'Original error message:\n',
-          err, file=sys.stderr)
+    albumentations_import_err=err
     ALBUMENTATIONS_IMPORTED = False
 
 class Augmentation(object):
 
     def __init__(self, width_height: int, num_channels: int):
+        self.albumentations_error_printed = False
+        self.width_height = width_height
+        self.num_channels = num_channels
+
         if not ALBUMENTATIONS_IMPORTED:
             return
 
-        self.width_height = width_height
-        self.num_channels = num_channels
         self.transform = Compose([
             RandomResizedCrop(height=self.width_height,
                                width=self.width_height,
@@ -34,6 +34,13 @@ class Augmentation(object):
 
     def augment(self, x: np.array, bboxes_dict: dict):
         if not ALBUMENTATIONS_IMPORTED:
+            if not self.albumentations_error_printed:
+                print('ERROR: Could not load albumentations library. This is a known issue '
+                    'on M1 Macs (#3880) and will prevent object detection augmentation from working. \n'
+                    'Original error message:\n',
+                    albumentations_import_err, file=sys.stderr)
+                self.albumentations_error_printed = True
+
             return x, bboxes_dict
 
         # convert from studio formats to albumentations format

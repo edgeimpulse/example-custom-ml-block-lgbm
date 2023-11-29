@@ -16,8 +16,12 @@ class TrainInput(NamedTuple):
     convertInt8: bool
     objectDetectionLastLayer: Optional[Literal['mobilenet-ssd', 'fomo', 'yolov5', 'yolov5v5-drpai', 'yolox', 'yolov7']]
     objectDetectionAugmentation: Optional[bool]
+    # Batch size is provided here when training SSD object detection models,
+    # but not used for other models.
+    objectDetectionBatchSize: Optional[int]
     syntiantTarget: Optional[bool]
     maxTrainingTimeSeconds: int
+    remainingGpuComputeTimeSeconds: int
     isEnterpriseProject: bool
 
 def parse_train_input(file: str) -> TrainInput:

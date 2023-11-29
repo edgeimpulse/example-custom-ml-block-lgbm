@@ -8,18 +8,20 @@ import numpy as np
 import tensorflow as tf
 import json, datetime, time, traceback
 import os, shutil, operator, functools, time, subprocess, math
-from sklearn.metrics import confusion_matrix, classification_report
-from sklearn.metrics import log_loss, mean_squared_error
 import ei_tensorflow.inference
 import ei_tensorflow.brainchip.model
 from concurrent.futures import ThreadPoolExecutor
 import ei_tensorflow.utils
 
 from ei_tensorflow.constrained_object_detection.util import batch_convert_segmentation_map_to_object_detection_prediction
-from ei_tensorflow.constrained_object_detection.metrics import non_background_metrics
 from ei_tensorflow.constrained_object_detection.metrics import dataset_match_by_near_centroids
 
-def tflite_predict(model, validation_dataset, dataset_length):
+from ei_sklearn.metrics import calculate_regression_metrics
+from ei_sklearn.metrics import calculate_classification_metrics
+from ei_sklearn.metrics import calculate_object_detection_metrics
+from ei_sklearn.metrics import calculate_fomo_metrics
+
+def tflite_predict(model, validation_dataset, dataset_length, item_feature_axes: list = None):
     """Runs a TensorFlow Lite model across a set of inputs"""
 
     interpreter = tf.lite.Interpreter(model_content=model)
@@ -33,6 +35,8 @@ def tflite_predict(model, validation_dataset, dataset_length):
     pred_y = []
     for item, label in validation_dataset.take(-1).as_numpy_iterator():
         item_as_tensor = ei_tensorflow.inference.process_input(input_details, item)
+        if item_feature_axes:
+            item_as_tensor = np.take(item_as_tensor, item_feature_axes)
         item_as_tensor = tf.reshape(item_as_tensor, input_details[0]['shape'])
         interpreter.set_tensor(input_details[0]['index'], item_as_tensor)
         interpreter.invoke()
@@ -60,20 +64,59 @@ def tflite_predict_object_detection(model, validation_dataset, dataset_length):
     pred_y = []
     for batch, _ in validation_dataset.take(-1):
         for item in batch:
-          item_as_tensor = ei_tensorflow.inference.process_input(input_details, item)
-          item_as_tensor = tf.reshape(item_as_tensor, input_details[0]['shape'])
-          interpreter.set_tensor(input_details[0]['index'], item_as_tensor)
-          interpreter.invoke()
-          rect_label_scores = ei_tensorflow.inference.process_output_object_detection(output_details, interpreter)
-          pred_y.append(rect_label_scores)
-          # Print an update at least every 10 seconds
-          current_time = time.time()
-          if last_log + 10 < current_time:
-              print('Profiling {0}% done'.format(int(100 / dataset_length * (len(pred_y) - 1))), flush=True)
-              last_log = current_time
+            item_as_tensor = ei_tensorflow.inference.process_input(input_details, item)
+            item_as_tensor = tf.reshape(item_as_tensor, input_details[0]['shape'])
+            interpreter.set_tensor(input_details[0]['index'], item_as_tensor)
+            interpreter.invoke()
+            rect_label_scores = ei_tensorflow.inference.process_output_object_detection(output_details, interpreter)
+            pred_y.append(rect_label_scores)
+            # Print an update at least every 10 seconds
+            current_time = time.time()
+            if last_log + 10 < current_time:
+                print('Profiling {0}% done'.format(int(100 / dataset_length * (len(pred_y) - 1))), flush=True)
+                last_log = current_time
 
     # Must specify dtype=object since it is a ragged array
     return np.array(pred_y, dtype=object)
+
+# Y_test is required to generate anchors for YOLOv2 output decoding
+def tflite_predict_yolov2(model, validation_dataset, Y_test, dataset_length, num_classes, output_directory):
+    import pickle
+
+    interpreter = tf.lite.Interpreter(model_content=model)
+    interpreter.allocate_tensors()
+
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
+
+    with open(os.path.join(output_directory, "akida_yolov2_anchors.pkl"), 'rb') as handle:
+        anchors = pickle.load(handle)
+
+    last_log = time.time()
+    pred_y = []
+    for batch, _ in validation_dataset.take(-1):
+        for item in batch:
+            item_as_tensor = ei_tensorflow.inference.process_input(input_details, item)
+            item_as_tensor = tf.reshape(item_as_tensor, input_details[0]['shape'])
+            interpreter.set_tensor(input_details[0]['index'], item_as_tensor)
+            _batch, width, height, _channels = input_details[0]['shape']
+            interpreter.invoke()
+            output = interpreter.get_tensor(output_details[0]['index'])[0]
+            if len(output.shape) == 2:
+                output = np.expand_dims(output, axis=0)
+            h, w, c = output.shape
+            output = output.reshape((h, w, len(anchors), 4 + 1 + num_classes))
+            rect_label_scores = ei_tensorflow.brainchip.model.process_output_yolov2(output, (width, height), num_classes, anchors)
+            pred_y.append(rect_label_scores)
+            # Print an update at least every 10 seconds
+            current_time = time.time()
+            if last_log + 10 < current_time:
+                print('Profiling {0}% done'.format(int(100 / dataset_length * (len(pred_y) - 1))), flush=True)
+                last_log = current_time
+
+    # Must specify dtype=object since it is a ragged array
+    result = np.array(pred_y, dtype=object)
+    return result
 
 def tflite_predict_yolov5(model, version, validation_dataset, dataset_length):
     """Runs a TensorFlow Lite model across a set of inputs"""
@@ -94,6 +137,7 @@ def tflite_predict_yolov5(model, version, validation_dataset, dataset_length):
             _batch, width, height, _channels = input_details[0]['shape']
             interpreter.invoke()
             output = interpreter.get_tensor(output_details[0]['index'])
+            output = np.array(ei_tensorflow.inference.process_output(output_details, output))
             # expects to have batch dim here, eg (1, 5376, 6)
             # if not, then add batch dim
             if len(output.shape) == 2:
@@ -123,27 +167,28 @@ def tflite_predict_yolox(model, validation_dataset, dataset_length):
     pred_y = []
     for batch, _ in validation_dataset.take(-1):
         for item in batch:
-          item_as_tensor = ei_tensorflow.inference.process_input(input_details, item)
-          item_as_tensor = tf.reshape(item_as_tensor, input_details[0]['shape'])
-          interpreter.set_tensor(input_details[0]['index'], item_as_tensor)
+            item_as_tensor = ei_tensorflow.inference.process_input(input_details, item)
+            item_as_tensor = tf.reshape(item_as_tensor, input_details[0]['shape'])
+            interpreter.set_tensor(input_details[0]['index'], item_as_tensor)
 
-          _batch, width, height, _channels = input_details[0]['shape']
-          if width != height:
-            raise Exception(f"expected square input, got {input_details[0]['shape']}")
+            _batch, width, height, _channels = input_details[0]['shape']
+            if width != height:
+                raise Exception(f"expected square input, got {input_details[0]['shape']}")
 
-          interpreter.invoke()
-          output = interpreter.get_tensor(output_details[0]['index'])
-          # expects to have batch dim here, eg (1, 5376, 6)
-          # if not, then add batch dim
-          if len(output.shape) == 2:
-            output = np.expand_dims(output, axis=0)
-          rect_label_scores = ei_tensorflow.inference.process_output_yolox(output, img_size=width)
-          pred_y.append(rect_label_scores)
-          # Print an update at least every 10 seconds
-          current_time = time.time()
-          if last_log + 10 < current_time:
-              print('Profiling {0}% done'.format(int(100 / dataset_length * (len(pred_y) - 1))), flush=True)
-              last_log = current_time
+            interpreter.invoke()
+            output = interpreter.get_tensor(output_details[0]['index'])
+            output = np.array(ei_tensorflow.inference.process_output(output_details, output))
+            # expects to have batch dim here, eg (1, 5376, 6)
+            # if not, then add batch dim
+            if len(output.shape) == 2:
+                output = np.expand_dims(output, axis=0)
+            rect_label_scores = ei_tensorflow.inference.process_output_yolox(output, img_size=width)
+            pred_y.append(rect_label_scores)
+            # Print an update at least every 10 seconds
+            current_time = time.time()
+            if last_log + 10 < current_time:
+                print('Profiling {0}% done'.format(int(100 / dataset_length * (len(pred_y) - 1))), flush=True)
+                last_log = current_time
 
     # Must specify dtype=object since it is a ragged array
     return np.array(pred_y, dtype=object)
@@ -161,18 +206,20 @@ def tflite_predict_yolov7(model, validation_dataset, dataset_length):
     pred_y = []
     for batch, _ in validation_dataset.take(-1):
         for item in batch:
-          item_as_tensor = ei_tensorflow.inference.process_input(input_details, item)
-          item_as_tensor = tf.reshape(item_as_tensor, input_details[0]['shape'])
-          interpreter.set_tensor(input_details[0]['index'], item_as_tensor)
-          interpreter.invoke()
-          rect_label_scores = ei_tensorflow.inference.process_output_yolov7(output_details,
-            width=input_details[0]['shape'][1], height=input_details[0]['shape'][2])
-          pred_y.append(rect_label_scores)
-          # Print an update at least every 10 seconds
-          current_time = time.time()
-          if last_log + 10 < current_time:
-              print('Profiling {0}% done'.format(int(100 / dataset_length * (len(pred_y) - 1))), flush=True)
-              last_log = current_time
+            item_as_tensor = ei_tensorflow.inference.process_input(input_details, item)
+            item_as_tensor = tf.reshape(item_as_tensor, input_details[0]['shape'])
+            interpreter.set_tensor(input_details[0]['index'], item_as_tensor)
+            interpreter.invoke()
+            output = interpreter.get_tensor(output_details[0]['index'])
+            output = ei_tensorflow.inference.process_output(output_details, output)
+            rect_label_scores = ei_tensorflow.inference.process_output_yolov7(output,
+                width=input_details[0]['shape'][1], height=input_details[0]['shape'][2])
+            pred_y.append(rect_label_scores)
+            # Print an update at least every 10 seconds
+            current_time = time.time()
+            if last_log + 10 < current_time:
+                print('Profiling {0}% done'.format(int(100 / dataset_length * (len(pred_y) - 1))), flush=True)
+                last_log = current_time
 
     # Must specify dtype=object since it is a ragged array
     return np.array(pred_y, dtype=object)
@@ -221,6 +268,10 @@ def get_tensor_details(tensor):
         details['dataType'] = 'int8'
         details['quantizationScale'] = tensor['quantization'][0]
         details['quantizationZeroPoint'] = tensor['quantization'][1]
+    elif tensor['dtype'] is np.uint8:
+        details['dataType'] = 'uint8'
+        details['quantizationScale'] = tensor['quantization'][0]
+        details['quantizationZeroPoint'] = tensor['quantization'][1]
     elif tensor['dtype'] is np.float32:
         details['dataType'] = 'float32'
     else:
@@ -244,75 +295,112 @@ def get_io_details(model, model_type):
         'outputs': outputs
     }
 
-def make_predictions(mode, model, validation_dataset, Y_test, train_dataset,
-                            Y_train, test_dataset, Y_real_test, akida_model_path):
-    if akida_model_path:
-        # TODO: We should avoid vendor-specific naming at this level, for maintainability
-        return ei_tensorflow.brainchip.model.make_predictions(mode, akida_model_path, validation_dataset,
-                                                              Y_test, train_dataset, Y_train, test_dataset, Y_real_test)
-
-    return make_predictions_tflite(mode, model, validation_dataset, Y_test,
-                                   train_dataset, Y_train, test_dataset, Y_real_test)
-
-def make_predictions_tflite(mode, model, validation_dataset, Y_test, train_dataset, Y_train, test_dataset, Y_real_test):
-    prediction_train = None
-    prediction_test = None
-
-    if mode == 'object-detection':
-        prediction = tflite_predict_object_detection(model, validation_dataset, len(Y_test))
-    elif mode == 'yolov5':
-        prediction = tflite_predict_yolov5(model, 6, validation_dataset, len(Y_test))
-    elif mode == 'yolov5v5-drpai':
-        prediction = tflite_predict_yolov5(model, 5, validation_dataset, len(Y_test))
-    elif mode == 'yolox':
-        prediction = tflite_predict_yolox(model, validation_dataset, len(Y_test))
-    elif mode == 'yolov7':
-        prediction = tflite_predict_yolov7(model, validation_dataset, len(Y_test))
-    elif mode == 'segmentation':
-        prediction = tflite_predict_segmentation(model, validation_dataset, len(Y_test))
+def make_predictions(mode, model, x_dataset, y, num_classes,
+                     output_directory: str, item_feature_axes: list = None):
+    if x_dataset is None:
+        return None
     else:
-        prediction = tflite_predict(model, validation_dataset, len(Y_test))
-        if (not train_dataset is None) and (not Y_train is None):
-            prediction_train = tflite_predict(model, train_dataset, len(Y_train))
-        if (not test_dataset is None) and (not Y_real_test is None):
-            prediction_test = tflite_predict(model, test_dataset, len(Y_real_test))
+        return make_predictions_tflite(mode, model, x_dataset, y, num_classes,
+                                       output_directory, item_feature_axes)
 
-    return prediction, prediction_train, prediction_test
+def make_predictions_tflite(mode, model, x_dataset, y, num_classes,
+                            output_directory, item_feature_axes: list = None):
+    if mode == 'object-detection':
+        return tflite_predict_object_detection(model, x_dataset, len(y))
+    elif mode == 'yolov5':
+        return tflite_predict_yolov5(model, 6, x_dataset, len(y))
+    elif mode == 'yolov2-akida':
+        return tflite_predict_yolov2(model, x_dataset, y, len(y), num_classes, output_directory)
+    elif mode == 'yolov5v5-drpai':
+        return tflite_predict_yolov5(model, 5, x_dataset, len(y))
+    elif mode == 'yolox':
+        return tflite_predict_yolox(model, x_dataset, len(y))
+    elif mode == 'yolov7':
+        return tflite_predict_yolov7(model, x_dataset, len(y))
+    elif mode == 'segmentation':
+        return tflite_predict_segmentation(model, x_dataset, len(y))
+    elif mode == 'visual-anomaly':
+        raise Exception('Expecting a supported mode to make predictions (visual-anomaly is not)')
+    else:
+        return tflite_predict(model, x_dataset, len(y), item_feature_axes)
 
 def profile_model(model_type, model, model_file, validation_dataset, Y_test, X_samples, Y_samples,
                          has_samples, memory, mode, prepare_model_tflite_script, prepare_model_tflite_eon_script,
-                         num_classes, train_dataset=None, Y_train=None, test_dataset=None, Y_real_test=None,
-                         akida_model_path=None):
+                         num_classes, train_dataset, Y_train, test_dataset, Y_real_test,
+                         akida_model_path,
+                         item_feature_axes: list,
+                         async_memory_profiling: bool):
+
     """Calculates performance statistics for a TensorFlow Lite model"""
     matrix_train=None
     matrix_test=None
     report_train=None
     report_test=None
 
-    prediction, prediction_train, prediction_test = make_predictions(mode, model, validation_dataset, Y_test,
-                                                                     train_dataset, Y_train, test_dataset,
-                                                                     Y_real_test, akida_model_path)
+    model_path = model_file if model_file is not None else akida_model_path
+    output_directory = os.path.dirname(os.path.realpath(model_path))
+
+    if mode != 'visual-anomaly':
+        if akida_model_path:
+            # TODO: refactor akida make_predictions in the same way we have
+            #       below making three calls, one per split
+            prediction, prediction_train, prediction_test = ei_tensorflow.brainchip.model.make_predictions(
+                mode, akida_model_path, validation_dataset, Y_test,
+                train_dataset, Y_train, test_dataset, Y_real_test,
+                num_classes, output_directory)
+
+            # akida returns logits so apply softmax for y_pred_prob metrics
+            from scipy.special import softmax
+            prediction = softmax(prediction, axis=-1)
+            if prediction_train is not None:
+                prediction_train = softmax(prediction_train, axis=-1)
+            if prediction_test is not None:
+                prediction_test = softmax(prediction_test, axis=-1)
+
+        else:
+            # TODO: we don't actually need to pass y here, just the #elements
+            prediction = make_predictions(
+                mode, model, validation_dataset, Y_test,
+                num_classes, output_directory, item_feature_axes)
+            prediction_train = make_predictions(
+                mode, model, train_dataset, Y_train,
+                num_classes, output_directory, item_feature_axes)
+            prediction_test = make_predictions(
+                mode, model, test_dataset, Y_real_test,
+                num_classes, output_directory, item_feature_axes)
 
     if mode == 'classification':
-        Y_labels = []
-        for ix in range(num_classes):
-            Y_labels.append(ix)
-        matrix = confusion_matrix(Y_test.argmax(axis=1), prediction.argmax(axis=1), labels=Y_labels)
-        report = classification_report(Y_test.argmax(axis=1), prediction.argmax(axis=1), output_dict=True, zero_division=0)
-        if not prediction_train is None:
-            matrix_train = confusion_matrix(Y_train.argmax(axis=1), prediction_train.argmax(axis=1))
-            report_train = classification_report(Y_train.argmax(axis=1), prediction_train.argmax(axis=1), output_dict=True, zero_division=0)
-        if not prediction_test is None:
-            matrix_test = confusion_matrix(Y_real_test.argmax(axis=1), prediction_test.argmax(axis=1))
-            report_test = classification_report(Y_real_test.argmax(axis=1), prediction_test.argmax(axis=1), output_dict=True, zero_division=0)
 
-        accuracy = report['accuracy']
-        loss = log_loss(Y_test, prediction)
+        metrics = calculate_classification_metrics(
+            num_classes,
+            y_true_one_hot=Y_test,
+            y_pred_probs=prediction)
+
+        matrix = metrics['confusion_matrix']
+        report = metrics['classification_report']
+        accuracy = metrics['classification_report']['accuracy']
+        loss = metrics['loss']
+
+        if prediction_train is not None:
+            metrics = calculate_classification_metrics(
+                num_classes, prediction_train, Y_train)
+            matrix_train = metrics['confusion_matrix']
+            report_train = metrics['classification_report']
+            # train accuracy and loss not used yet...
+
+        if prediction_test is not None:
+            metrics = calculate_classification_metrics(
+                num_classes, prediction_test, Y_real_test)
+            matrix_test = metrics['confusion_matrix']
+            report_test = metrics['classification_report']
+            # test accuracy and loss not used yet...
+
+        # TODO: move feature explorer code here and for regression into own helper
         try:
             # Make predictions for feature explorer
             if has_samples:
                 if model:
-                    feature_explorer_predictions = tflite_predict(model, X_samples, len(Y_samples))
+                    feature_explorer_predictions = tflite_predict(model, X_samples, len(Y_samples), item_feature_axes)
                 elif akida_model_path:
                     feature_explorer_predictions = ei_tensorflow.brainchip.model.predict(akida_model_path, X_samples, len(Y_samples))
                 else:
@@ -325,15 +413,23 @@ def profile_model(model_type, model, model_file, validation_dataset, Y_test, X_s
         except Exception as e:
             print('Failed to generate feature explorer', e, flush=True)
             prediction_samples = []
+
     elif mode == 'regression':
+
+        metrics = calculate_regression_metrics(
+            y_true=Y_test,
+            y_pred=prediction[:,0]
+        )
+
         matrix = np.array([])
         report = {}
         accuracy = 0
-        loss = mean_squared_error(Y_test, prediction[:,0])
+        loss = metrics['mean_squared_error']
+
         try:
             # Make predictions for feature explorer
             if has_samples:
-                feature_explorer_predictions = tflite_predict(model, X_samples, len(Y_samples))
+                feature_explorer_predictions = tflite_predict(model, X_samples, len(Y_samples), item_feature_axes)
                 # Store each prediction with the original sample for the feature explorer
                 prediction_samples = np.concatenate((Y_samples, feature_explorer_predictions), axis=1).tolist()
             else:
@@ -341,45 +437,24 @@ def profile_model(model_type, model, model_file, validation_dataset, Y_test, X_s
         except Exception as e:
             print('Failed to generate feature explorer', e, flush=True)
             prediction_samples = []
-    elif mode == 'object-detection' or mode == 'yolov5' or mode == 'yolov5v5-drpai' or mode == 'yolox':
-        # This is only installed on object detection containers so import it only when used
-        from mean_average_precision import MetricBuilder
-        metric_fn = MetricBuilder.build_evaluation_metric("map_2d", async_mode=True, num_classes=num_classes)
-        # Calculate mean average precision
-        def un_onehot(onehot_array):
-            """Go from our one-hot encoding to an index"""
-            val = np.argmax(onehot_array, axis=0)
-            return val
-        for index, sample in enumerate(validation_dataset.take(-1).unbatch()):
-            data = sample[0]
-            labels = sample[1]
-            p = prediction[index]
-            gt = []
-            curr_ps = []
 
-            boxes = labels[0]
-            labels = labels[1]
-            for box_index, box in enumerate(boxes):
-                label = labels[box_index]
-                label = un_onehot(label)
-                gt.append([box[0], box[1], box[2], box[3], label, 0, 0])
+    elif mode == 'object-detection' or mode == 'yolov2-akida' or mode == 'yolov5' or mode == 'yolov5v5-drpai' or mode == 'yolox':
+        y_true_bbox_labels = []
+        for sample in validation_dataset.take(-1).unbatch():
+            y_true_bbox_labels.append(sample)
 
-            for p2 in p:
-                curr_ps.append([p2[0][0], p2[0][1], p2[0][2], p2[0][3], p2[1], p2[2]])
-
-            gt = np.array(gt)
-            curr_ps = np.array(curr_ps)
-
-            metric_fn.add(curr_ps, gt)
-
-        coco_map = metric_fn.value(iou_thresholds=np.arange(0.5, 1.0, 0.05),
-                                   recall_thresholds=np.arange(0., 1.01, 0.01), mpolicy='soft')['mAP']
+        metrics = calculate_object_detection_metrics(
+            num_classes=num_classes,
+            y_true_bbox_labels=y_true_bbox_labels,
+            y_pred=prediction
+        )
 
         matrix = np.array([])
         report = {}
-        accuracy = float(coco_map)
+        accuracy = metrics['coco_map']
         loss = 0
         prediction_samples = []
+
     elif mode == 'segmentation':
 
         _batch, width, height, num_classes = prediction.shape
@@ -401,13 +476,30 @@ def profile_model(model_type, model, model_file, validation_dataset, Y_test, X_s
             # batch the data since the function expects it
             validation_dataset.batch(32, drop_remainder=False), y_pred, output_width_height)
 
-        # TODO(mat): we need to pass out recall too for FOMO
-        matrix = confusion_matrix(y_true_labels, y_pred_labels, labels=range(num_classes))
-        _precision, _recall, f1 = non_background_metrics(y_true_labels, y_pred_labels, num_classes)
-        report = classification_report(y_true_labels, y_pred_labels, output_dict=True, zero_division=0)
-        accuracy = f1
+        metrics = calculate_fomo_metrics(num_classes, y_true_labels, y_pred_labels)
+
+        matrix = metrics['confusion_matrix']
+        report = metrics['classification_report']
+        accuracy = metrics['non_background']['f1']
         loss = 0
         prediction_samples = []
+
+    elif mode == 'anomaly-gmm':
+        # by definition we don't have any anomalies in the training dataset
+        # so we don't calculate these metrics
+        loss = 0
+        prediction_samples = []
+        accuracy = 0
+        matrix = np.array([])
+        report = {}
+    elif mode == 'visual-anomaly':
+        # by definition we don't have any anomalies in the training dataset
+        # so we don't calculate these metrics
+        loss = 0
+        prediction_samples = []
+        accuracy = 0
+        matrix = np.array([])
+        report = {}
 
     model_size = 0
     if model:
@@ -419,9 +511,24 @@ def profile_model(model_type, model, model_file, validation_dataset, Y_test, X_s
     else:
         is_supported_on_mcu, mcu_support_error = check_if_model_runs_on_mcu(model_file, log_messages=False)
 
+    memory_async = None
     if (is_supported_on_mcu):
         if (not memory):
-            memory = calculate_memory(model_file, model_type, mode, prepare_model_tflite_script, prepare_model_tflite_eon_script)
+            # If this is true (passed in from studio/server/training/train-templates/profile.ts)
+            # then we will kick off a separate Docker container to calculate RAM/ROM.
+            # Post-training the metadata is read (in studio/server/training/learn-block-keras.ts)
+            # and any metrics that have `memoryAsync` will fire off a separate job (see handleAsyncMemory).
+            # After the async memory is completed, the async memory job will overwrite the `memory` section
+            # of the metadata (so once this job is finished, the metadata looks 100% the same as when you
+            # do in-process memory profiling.
+            # We can't always do this (at the moment), as e.g. the EON Tuner expects memory to be available
+            # synchronous.
+            if async_memory_profiling:
+                memory_async = {
+                    'type': 'requires-profiling',
+                }
+            else:
+                memory = calculate_memory(model_file, model_type, mode, prepare_model_tflite_script, prepare_model_tflite_eon_script)
     else:
         memory = {}
         memory['tflite'] = {
@@ -452,6 +559,7 @@ def profile_model(model_type, model, model_file, validation_dataset, Y_test, X_s
         'size': model_size,
         'estimatedMACCs': None,
         'memory': memory,
+        'memoryAsync': memory_async,
         'predictions': prediction_samples,
         'isSupportedOnMcu': is_supported_on_mcu,
         'mcuSupportError': mcu_support_error,
@@ -527,7 +635,11 @@ def calculate_memory(model_file, model_type, mode, prepare_model_tflite_script, 
                     # add fudge factor since the target architecture is different
                     # (q: can this go since the changes in https://github.com/edgeimpulse/edgeimpulse/pull/6268)
                     old_arena_size = tflite_output['arenaSize']
-                    extra_arena_size = int(math.floor((math.ceil(old_arena_size) * 0.2) + 1024))
+                    if "anomaly" in model_file:
+                        fudge_factor = 0.25
+                    else:
+                        fudge_factor = 0.2
+                    extra_arena_size = int(math.floor((math.ceil(old_arena_size) * fudge_factor) + 1024))
 
                     tflite_output['ram'] = tflite_output['ram'] + extra_arena_size
                     tflite_output['arenaSize'] = tflite_output['arenaSize'] + extra_arena_size
@@ -673,7 +785,8 @@ def get_model_metadata(keras_model, validation_dataset, Y_test, X_samples, Y_sam
                        class_names, object_detection_last_layer, curr_metadata, mode, prepare_model_tflite_script,
                        prepare_model_tflite_eon_script, model_float32=None, model_int8=None,
                        file_float32=None, file_int8=None, file_akida=None,
-                       train_dataset=None, Y_train=None, test_dataset=None, Y_real_test=None):
+                       train_dataset=None, Y_train=None, test_dataset=None, Y_real_test=None,
+                       async_memory_profiling=False):
 
     metadata = {
         'metadataVersion': 5,
@@ -688,6 +801,21 @@ def get_model_metadata(keras_model, validation_dataset, Y_test, X_samples, Y_sam
         'performance': None,
         'objectDetectionLastLayer': object_detection_last_layer
     }
+
+    # keep metadata from anomaly (gmm) training
+    item_feature_axes = None
+    if (
+            curr_metadata and
+            'mean' in curr_metadata and
+            'scale' in curr_metadata and
+            'axes' in curr_metadata and
+            'defaultMinimumConfidenceRating' in curr_metadata
+    ):
+        metadata['mean'] = curr_metadata['mean']
+        metadata['scale'] = curr_metadata['scale']
+        metadata['axes'] = curr_metadata['axes']
+        metadata['defaultMinimumConfidenceRating'] = curr_metadata['defaultMinimumConfidenceRating']
+        item_feature_axes = metadata['axes']
 
     recalculate_memory = True
     recalculate_performance = True
@@ -762,7 +890,10 @@ def get_model_metadata(keras_model, validation_dataset, Y_test, X_samples, Y_sam
 
     if model_float32:
         try:
-            print('Profiling float32 model...', flush=True)
+            if async_memory_profiling:
+                print('Calculating float32 accuracy...', flush=True)
+            else:
+                print('Profiling float32 model...', flush=True)
             model_type = 'float32'
 
             memory = None
@@ -771,7 +902,27 @@ def get_model_metadata(keras_model, validation_dataset, Y_test, X_samples, Y_sam
                 if (len(curr_metrics) > 0):
                     memory = curr_metrics[0]['memory']
 
-            float32_perf = profile_model(model_type, model_float32, file_float32, validation_dataset, Y_test, X_samples, Y_samples, has_samples, memory, mode, prepare_model_tflite_script, prepare_model_tflite_eon_script, len(class_names), train_dataset, Y_train, test_dataset, Y_real_test)
+            float32_perf = profile_model(
+                model_type=model_type,
+                model=model_float32,
+                model_file=file_float32,
+                validation_dataset=validation_dataset,
+                Y_test=Y_test,
+                X_samples=X_samples,
+                Y_samples=Y_samples,
+                has_samples=has_samples,
+                memory=memory,
+                mode=mode,
+                prepare_model_tflite_script=prepare_model_tflite_script,
+                prepare_model_tflite_eon_script=prepare_model_tflite_eon_script,
+                num_classes=len(class_names),
+                train_dataset=train_dataset,
+                Y_train=Y_train,
+                test_dataset=test_dataset,
+                Y_real_test=Y_real_test,
+                akida_model_path=None,
+                item_feature_axes=item_feature_axes,
+                async_memory_profiling=async_memory_profiling)
             float32_perf['estimatedMACCs'] = estimated_maccs
             metadata['availableModelTypes'].append(model_type)
             metadata['modelValidationMetrics'].append(float32_perf)
@@ -783,7 +934,10 @@ def get_model_metadata(keras_model, validation_dataset, Y_test, X_samples, Y_sam
 
     if model_int8:
         try:
-            print('Profiling int8 model...', flush=True)
+            if async_memory_profiling:
+                print('Calculating int8 accuracy...', flush=True)
+            else:
+                print('Profiling int8 model...', flush=True)
             model_type = 'int8'
 
             memory = None
@@ -792,7 +946,27 @@ def get_model_metadata(keras_model, validation_dataset, Y_test, X_samples, Y_sam
                 if (len(curr_metrics) > 0):
                     memory = curr_metrics[0]['memory']
 
-            int8_perf = profile_model(model_type, model_int8, file_int8, validation_dataset, Y_test, X_samples, Y_samples, has_samples, memory, mode, prepare_model_tflite_script, prepare_model_tflite_eon_script, len(class_names), train_dataset, Y_train, test_dataset, Y_real_test)
+            int8_perf = profile_model(
+                model_type=model_type,
+                model=model_int8,
+                model_file=file_int8,
+                validation_dataset=validation_dataset,
+                Y_test=Y_test,
+                X_samples=X_samples,
+                Y_samples=Y_samples,
+                has_samples=has_samples,
+                memory=memory,
+                mode=mode,
+                prepare_model_tflite_script=prepare_model_tflite_script,
+                prepare_model_tflite_eon_script=prepare_model_tflite_eon_script,
+                num_classes=len(class_names),
+                train_dataset=train_dataset,
+                Y_train=Y_train,
+                test_dataset=test_dataset,
+                Y_real_test=Y_real_test,
+                akida_model_path=None,
+                item_feature_axes=item_feature_axes,
+                async_memory_profiling=async_memory_profiling)
             int8_perf['estimatedMACCs'] = estimated_maccs
             metadata['availableModelTypes'].append(model_type)
             metadata['modelValidationMetrics'].append(int8_perf)
@@ -827,18 +1001,28 @@ def get_model_metadata(keras_model, validation_dataset, Y_test, X_samples, Y_sam
             io_details = get_io_details(model_int8, model_type)
         else:
             io_details = None
-        akida_perf = profile_model(model_type, None, None, validation_dataset, Y_test, X_samples,
-                                   Y_samples, has_samples, memory, mode, None,
-                                   None, len(class_names), train_dataset,
-                                   Y_train, test_dataset, Y_real_test, file_akida)
+        akida_perf = profile_model(
+            model_type=model_type,
+            model=None,
+            model_file=None,
+            validation_dataset=validation_dataset,
+            Y_test=Y_test,
+            X_samples=X_samples,
+            Y_samples=Y_samples,
+            has_samples=has_samples,
+            memory=memory,
+            mode=mode,
+            prepare_model_tflite_script=None,
+            prepare_model_tflite_eon_script=None,
+            num_classes=len(class_names),
+            train_dataset=train_dataset,
+            Y_train=Y_train,
+            test_dataset=test_dataset,
+            Y_real_test=Y_real_test,
+            akida_model_path=file_akida,
+            item_feature_axes=None,
+            async_memory_profiling=False)
         sparsity = ei_tensorflow.brainchip.model.get_model_sparsity(file_akida, mode, validation_dataset)
-        print("########################################")
-        print(f"Model sparsity: {sparsity:6.2f} %")
-        print(f"Used NPs:   {total_nps:10d}")
-        print(f"Used nodes: {nodes:10d}")
-        print(f"FLOPS: {flops:15d}")
-        print(f"MACs: {macs:20.8}")
-        print("########################################")
         akida_perf['estimatedMACCs'] = macs
         metadata['availableModelTypes'].append(model_type)
         metadata['modelValidationMetrics'].append(akida_perf)
@@ -846,6 +1030,31 @@ def get_model_metadata(keras_model, validation_dataset, Y_test, X_samples, Y_sam
         # (or less - see Dense layer)
         if io_details is not None:
             metadata['modelIODetails'].append(io_details)
+
+        # Also store against deviceSpecificPerformance
+        metadata['deviceSpecificPerformance'] = {
+            'brainchip-akd1000': {
+                'model_quantized_int8_io.tflite': {
+                    'latency': 0,
+                    'ram': -1,
+                    'rom': program_size,
+                    'customMetrics': [
+                        {
+                            'name': 'nps',
+                            'value': str(total_nps)
+                        },
+                        {
+                            'name': 'sparsity',
+                            'value': f'{sparsity:.2f}%'
+                        },
+                        {
+                            'name': 'macs',
+                            'value': str(int(macs))
+                        }
+                    ]
+                }
+            }
+        }
 
     # Decide which model to recommend
     if file_akida:
@@ -858,31 +1067,41 @@ def get_model_metadata(keras_model, validation_dataset, Y_test, X_samples, Y_sam
 
 def profile_tflite_file(file, model_type, mode,
                         prepare_model_tflite_script,
-                        prepare_model_tflite_eon_script):
+                        prepare_model_tflite_eon_script,
+                        calculate_inferencing_time,
+                        calculate_is_supported_on_mcu,
+                        calculate_non_cmsis):
     metadata = {
         'tfliteFileSizeBytes': os.path.getsize(file)
     }
-    try:
-        args = '/app/profiler/build/profiling ' + file
 
-        print('Calculating inferencing time...', flush=True)
-        a = os.popen(args).read()
-        metadata['performance'] = json.loads(a[a.index('{'):a.index('}')+1])
-        print('Calculating inferencing time OK', flush=True)
-    except Exception as err:
-        print('Error while calculating inferencing time:', flush=True)
-        print(err, flush=True)
-        traceback.print_exc()
+    if calculate_inferencing_time:
+        try:
+            args = '/app/profiler/build/profiling ' + file
+
+            print('Calculating inferencing time...', flush=True)
+            a = os.popen(args).read()
+            metadata['performance'] = json.loads(a[a.index('{'):a.index('}')+1])
+            print('Calculating inferencing time OK', flush=True)
+        except Exception as err:
+            print('Error while calculating inferencing time:', flush=True)
+            print(err, flush=True)
+            traceback.print_exc()
+            metadata['performance'] = None
+    else:
         metadata['performance'] = None
 
-
-    is_supported_on_mcu, mcu_support_error = check_if_model_runs_on_mcu(file, log_messages=True)
-    metadata['isSupportedOnMcu'] = is_supported_on_mcu
-    metadata['mcuSupportError'] = mcu_support_error
+    if calculate_is_supported_on_mcu:
+        is_supported_on_mcu, mcu_support_error = check_if_model_runs_on_mcu(file, log_messages=True)
+        metadata['isSupportedOnMcu'] = is_supported_on_mcu
+        metadata['mcuSupportError'] = mcu_support_error
+    else:
+        metadata['isSupportedOnMcu'] = True
+        metadata['mcuSupportError'] = None
 
     if (metadata['isSupportedOnMcu']):
         metadata['memory'] = calculate_memory(file, model_type, mode, prepare_model_tflite_script, prepare_model_tflite_eon_script,
-                                              calculate_non_cmsis=True)
+                                              calculate_non_cmsis=calculate_non_cmsis)
     return metadata
 
 def check_if_model_runs_on_mcu(file, log_messages):

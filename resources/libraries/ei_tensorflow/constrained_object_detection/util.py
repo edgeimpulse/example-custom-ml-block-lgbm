@@ -17,6 +17,14 @@ def bbox_range_check(x0: float, y0: float, x1: float, y1: float):
     if x0 > x1: raise Exception("expected x0", x0, "to be < x1", x1)
     if y0 > y1: raise Exception("expected y0", y0, "to be < y1", y1)
 
+def convert_bounding_boxes_to_mask(bboxes: List[BoundingBox],
+                                   height_width: int) -> np.ndarray:
+    mask = np.zeros((height_width, height_width), dtype=np.uint8)
+    for bbox in bboxes:
+        bbox = bbox.floored()
+        mask[bbox.x0:bbox.x1, bbox.y0:bbox.y1] = 1
+    return mask
+
 def convert_from_ragged(bboxes_batch: RaggedTensor,
                         labels_batch: RaggedTensor,
                         offset_label_by_one: bool=False) -> List[List[BoundingBoxLabelScore]]:
@@ -35,14 +43,20 @@ def convert_from_ragged(bboxes_batch: RaggedTensor,
         batch, the inner list representing the detections per element of the batch
     """
     batch_bbox_label_scores = []
-    for batch_idx, (bboxes, one_hot_labels) in enumerate(zip(bboxes_batch, labels_batch)):
+
+    # explicitly convert the batch to numpy() _before_ any iteration
+    # otherwise it seems this corrupts the ragged tensor on GPU
+    bboxes_batch = bboxes_batch.numpy()
+    labels_batch = labels_batch.numpy()
+
+    for bboxes, one_hot_labels in zip(bboxes_batch, labels_batch):
         # un one hotify the labels
-        _idxs, labels = np.where(one_hot_labels.numpy()==1.0)
+        _idxs, labels = np.where(one_hot_labels==1.0)
 
         # convert to list of BoundingBoxLabelScores
         bbox_label_scores = []
         for bbox, label in zip(bboxes, labels):
-            x0, y0, x1, y1 = map(float, bbox.numpy())
+            x0, y0, x1, y1 = map(float, bbox)
             label = int(label)
             if offset_label_by_one:
                 label += 1

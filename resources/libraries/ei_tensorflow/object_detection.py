@@ -20,17 +20,19 @@ from object_detection.builders import model_builder
 from object_detection.export_tflite_graph_lib_tf2 import export_tflite_model
 from object_detection.protos import pipeline_pb2
 from google.protobuf import text_format
-from ei_tensorflow.training import get_friendly_time, print_training_time_exceeded
+from ei_tensorflow.training import get_friendly_time, print_training_time_exceeded, check_gpu_time_exceeded
 
 from ei_tensorflow.conversion import run_converter
 
 MAX_TRAINING_TIME_S = 24 * 60 * 60
+MAX_GPU_TIME_S = 1500 * 60
 IS_ENTERPRISE_PROJECT = False
 
-def set_limits(max_training_time_s, is_enterprise_project):
-    global MAX_TRAINING_TIME_S, IS_ENTERPRISE_PROJECT
+def set_limits(max_training_time_s, max_gpu_time_s, is_enterprise_project):
+    global MAX_TRAINING_TIME_S, MAX_GPU_TIME_S, IS_ENTERPRISE_PROJECT
 
     MAX_TRAINING_TIME_S = max_training_time_s
+    MAX_GPU_TIME_S = max_gpu_time_s
     IS_ENTERPRISE_PROJECT = is_enterprise_project
 
 def train(num_classes, learning_rate, num_epochs, train_dataset, validation_dataset):
@@ -108,7 +110,7 @@ def train(num_classes, learning_rate, num_epochs, train_dataset, validation_data
     validation_fn = get_model_validation_function(detection_model)
 
     run_loop(num_epochs, train_dataset, num_classes, train_step_fn, validation_dataset, validation_fn,
-        MAX_TRAINING_TIME_S, IS_ENTERPRISE_PROJECT)
+        MAX_TRAINING_TIME_S, MAX_GPU_TIME_S, IS_ENTERPRISE_PROJECT)
 
     print('Finished fine tuning')
 
@@ -118,7 +120,7 @@ def train(num_classes, learning_rate, num_epochs, train_dataset, validation_data
     return detection_model
 
 def run_loop(num_epochs, train_dataset, num_classes, train_step_fn, validation_dataset, validation_fn,
-             max_training_time_s, is_enterprise_project):
+             max_training_time_s, max_gpu_time_s, is_enterprise_project):
     print('Fine tuning...', flush=True)
 
     epoch_0_begin = time.time()
@@ -184,6 +186,7 @@ def run_loop(num_epochs, train_dataset, num_classes, train_step_fn, validation_d
             if (total_time > max_training_time_s * 1.2):
                 print_training_time_exceeded(is_enterprise_project, max_training_time_s, total_time)
                 exit(1)
+            check_gpu_time_exceeded(max_gpu_time_s, total_time)
 
         if idx % 1 == 0:
             print('Epoch ' + str(idx + 1) + ' of ' + str(num_epochs)

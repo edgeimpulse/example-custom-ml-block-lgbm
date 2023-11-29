@@ -11,6 +11,7 @@ from typing_extensions import Literal
 import typing
 
 import ei_tensorflow.utils
+import ei_tensorflow.gpu
 from ei_augmentation.object_detection import Augmentation
 
 # Loads a features file, mmap's if size is above 128MiB
@@ -22,26 +23,6 @@ def np_load_file_auto_mmap(file):
     else:
         return np.load(file)
 
-# rescale the input (according to image_input_scaling) if needed
-def rescale_input(X, image_input_scaling: typing.Optional[Literal['0..1', '0..255', 'torch']]):
-    # scale input (if needed, by default this is 0..1)
-    if len(X.shape) == 4:
-        if (image_input_scaling == '0..255'):
-            X = X * 255.0
-        elif (image_input_scaling == 'torch'):
-            mean = [0.485, 0.456, 0.406]
-            std = [0.229, 0.224, 0.225]
-
-            X[:, :, :, 0] -= mean[0]
-            X[:, :, :, 1] -= mean[1]
-            X[:, :, :, 2] -= mean[2]
-            X[:, :, :, 0] /= std[0]
-            X[:, :, :, 1] /= std[1]
-            X[:, :, :, 2] /= std[2]
-
-    return X
-
-
 # Since the data files are too large to load into memory, we must split and shuffle them by writing their contents to
 # new files in random order. The new files can be memory mapped in turn.
 def split_and_shuffle_data(y_type, classes, classes_values, mode, seed, dir_path, test_size=0.2,
@@ -50,8 +31,7 @@ def split_and_shuffle_data(y_type, classes, classes_values, mode, seed, dir_path
                            output_directory='/tmp',
                            model_input_shape=None,
                            custom_validation_split=False,
-                           custom_validation_split_path='custom_validation_split.json',
-                           image_input_scaling: typing.Optional[Literal['0..1', '0..255', 'torch']]=None):
+                           custom_validation_split_path='custom_validation_split.json'):
     # This is where the split data will be written
     X_train_output_path = os.path.join(output_directory, 'X_split_train.npy')
     X_train_raw_output_path = os.path.join(output_directory, 'X_split_train_raw.npy')
@@ -109,8 +89,6 @@ def split_and_shuffle_data(y_type, classes, classes_values, mode, seed, dir_path
 
     if (model_input_shape):
         X = X.reshape(tuple([ X.shape[0] ]) + model_input_shape)
-
-    X = rescale_input(X, image_input_scaling=image_input_scaling)
 
     # Facilitates custom split
     X_train_ids_assigned = []
@@ -239,7 +217,7 @@ def get_dataset_from_folder(input,
                             RANDOM_SEED,
                             online_dsp_config,
                             input_shape,
-                            image_input_scaling: typing.Optional[Literal['0..1', '0..255', 'torch']]):
+                            ensure_determinism=False):
     y_type = input.yType
     raw_data_path = 'X_train_raw.npy' if hasattr(input, 'onlineDspConfig') else None
     classes_values = input.classes
@@ -262,8 +240,7 @@ def get_dataset_from_folder(input,
             X_train_raw_path=raw_data_path,
             stratify_sample=False,
             model_input_shape=input_shape,
-            custom_validation_split=custom_validation_split,
-            image_input_scaling=image_input_scaling)
+            custom_validation_split=custom_validation_split)
         print('Splitting data into training and validation sets OK', flush=True)
 
         # A subset of training data used for the feature explorer (we copy to /tmp here)
@@ -274,19 +251,26 @@ def get_dataset_from_folder(input,
         if (len(X_samples.shape) == 2 and np.prod(input_shape) == X_samples.shape[1]):
             X_samples = X_samples.reshape((X_samples.shape[0], ) + tuple(input_shape))
 
-        X_samples = rescale_input(X_samples, image_input_scaling=image_input_scaling)
-
     if (input.flattenDataset):
         X_train = X_train.reshape((X_train.shape[0], int(X_train.size / X_train.shape[0])))
         X_test = X_test.reshape((X_test.shape[0], int(X_test.size / X_test.shape[0])))
 
     object_detection_last_layer = input.objectDetectionLastLayer if input.mode == 'object-detection' else None
     obj_detection_augmentation = input.objectDetectionAugmentation
+    object_detection_batch_size = None
+    
+    # Get batch size for SSD models.
+    # "Standard" models (i.e. non object-detection + FOMO) pass this via expert mode.
+    if input.mode == 'object-detection' and object_detection_last_layer != 'fomo':
+        object_detection_batch_size = input.objectDetectionBatchSize
+
     train_dataset, validation_dataset, samples_dataset = get_datasets(X_train, Y_train, X_test, Y_test,
                         has_samples, X_samples, Y_samples, mode, classes,
                         input_shape, X_train_raw, online_dsp_config,
                         obj_detection_augmentation,
-                        object_detection_last_layer)
+                        object_detection_last_layer,
+                        object_detection_batch_size=object_detection_batch_size,
+                        ensure_determinism=ensure_determinism)
 
     return train_dataset, validation_dataset, samples_dataset, X_train, X_test, Y_train, Y_test, has_samples, X_samples, Y_samples
 
@@ -392,7 +376,12 @@ def load_samples(dir_path):
 
 def get_datasets(X_train, Y_train, X_test, Y_test, has_samples, X_samples, Y_samples,
                  mode, classes, reshape_to, X_train_raw=None, online_dsp_config=None,
-                 augmentation_enabled=False, object_detection_last_layer=None):
+                 augmentation_enabled=False, object_detection_last_layer=None,
+                 object_detection_batch_size=None, ensure_determinism=False):
+
+    # Autotune parallel calls is usually sensible, but can be non-deterministic, so we
+    # allow disabling for integration tests to prevent intermittent fails.
+    parallel_calls_policy = None if ensure_determinism else tf.data.experimental.AUTOTUNE
 
     if mode == 'object-detection':
         def format_object_detection_data(target_shape):
@@ -424,17 +413,22 @@ def get_datasets(X_train, Y_train, X_test, Y_test, has_samples, X_samples, Y_sam
             target_shape = (1, *reshape_to)
 
         train_dataset = train_dataset.map(format_object_detection_data(target_shape),
-                                          tf.data.experimental.AUTOTUNE)
+                                          parallel_calls_policy)
         validation_dataset = validation_dataset.map(format_object_detection_data(target_shape),
-                                          tf.data.experimental.AUTOTUNE)
-        # FOMO sets batch size in expert mode
+                                          parallel_calls_policy)
+
+        # Cache datasets in memory
+        if not augmentation_enabled and ei_tensorflow.utils.can_cache_data(X_train):
+            train_dataset = train_dataset.cache()
+            validation_dataset = validation_dataset.cache()
+
+        # For SSD models we don't have expert mode, so we pass batch size via input and set batch size here.
+        # FOMO sets batch size in expert mode.
         if object_detection_last_layer != 'fomo':
-            if len(tf.config.list_physical_devices('GPU')) > 0:
-                BATCH_SIZE = 128
-            else:
-                BATCH_SIZE = 32
-            train_dataset = train_dataset.batch(BATCH_SIZE, drop_remainder=False)
-            validation_dataset = validation_dataset.batch(BATCH_SIZE, drop_remainder=False)
+            # TODO: Add shuffle here for SSD models. This was causing a memory leak.
+            print(f'Using batch size: {object_detection_batch_size}', flush=True)
+            train_dataset = train_dataset.batch(object_detection_batch_size, drop_remainder=False)
+            validation_dataset = validation_dataset.batch(object_detection_batch_size, drop_remainder=False)
 
         return train_dataset, validation_dataset, None
     else:
@@ -442,7 +436,7 @@ def get_datasets(X_train, Y_train, X_test, Y_test, has_samples, X_samples, Y_sam
             train_dataset = get_dataset_standard(X_train, Y_train)
         else:
             train_dataset = get_dataset_standard(X_train_raw, Y_train)
-            train_dataset = train_dataset.map(get_dsp_function(online_dsp_config), tf.data.experimental.AUTOTUNE)
+            train_dataset = train_dataset.map(get_dsp_function(online_dsp_config), parallel_calls_policy)
         validation_dataset = get_dataset_standard(X_test, Y_test)
         if has_samples:
             samples_dataset = get_dataset_standard(X_samples, Y_samples)
@@ -450,10 +444,15 @@ def get_datasets(X_train, Y_train, X_test, Y_test, has_samples, X_samples, Y_sam
             samples_dataset = None
 
         # Reshape data on the fly, using multiprocessing if possible
-        train_dataset = train_dataset.map(get_reshape_function(reshape_to), tf.data.experimental.AUTOTUNE)
-        validation_dataset = validation_dataset.map(get_reshape_function(reshape_to), tf.data.experimental.AUTOTUNE)
+        train_dataset = train_dataset.map(get_reshape_function(reshape_to), parallel_calls_policy)
+        validation_dataset = validation_dataset.map(get_reshape_function(reshape_to), parallel_calls_policy)
         if has_samples:
-            samples_dataset = samples_dataset.map(get_reshape_function(reshape_to), tf.data.experimental.AUTOTUNE)
+            samples_dataset = samples_dataset.map(get_reshape_function(reshape_to), parallel_calls_policy)
+
+        # Cache datasets in memory
+        if ei_tensorflow.utils.can_cache_data(X_train):
+            train_dataset = train_dataset.cache()
+            validation_dataset = validation_dataset.cache()
 
         return train_dataset, validation_dataset, samples_dataset
 
@@ -482,12 +481,13 @@ def get_dsp_function(online_dsp_config):
     return run_dsp
 
 def get_callbacks(dir_path, mode, best_model_path, object_detection_last_layer,
-                  is_enterprise_project, max_training_time_s, enable_tensorboard):
+                  is_enterprise_project, max_training_time_s, max_gpu_time_s, enable_tensorboard):
     callbacks = []
     if mode == 'object-detection':
         if (object_detection_last_layer == 'fomo'):
             handle_training_deadline_callback = HandleTrainingDeadline(
-                is_enterprise_project=is_enterprise_project, max_training_time_s=max_training_time_s)
+                is_enterprise_project=is_enterprise_project, max_training_time_s=max_training_time_s,
+                max_gpu_time_s=max_gpu_time_s)
             callbacks.append(handle_training_deadline_callback)
     else:
         # Saves the best model, based on validation loss (hopefully more meaningful than just accuracy)
@@ -501,7 +501,8 @@ def get_callbacks(dir_path, mode, best_model_path, object_detection_last_layer,
             verbose=0)
 
         handle_training_deadline_callback = HandleTrainingDeadline(
-            is_enterprise_project=is_enterprise_project, max_training_time_s=max_training_time_s)
+            is_enterprise_project=is_enterprise_project, max_training_time_s=max_training_time_s,
+            max_gpu_time_s=max_gpu_time_s)
 
         # We'll pass this array into the train function and add more callbacks there
         callbacks.append(model_checkpoint_callback)
@@ -583,7 +584,7 @@ def save_model(keras_model, best_model_path, dir_path, saved_model_dir,
         # has legacy expert mode code before we added the 'callbacks' array) then
         # just use the original model
         if os.path.exists(best_model_path):
-            print('Saving best performing model...', flush=True)
+            print('Saving best performing model... (based on validation loss)', flush=True)
             keras_model = load_best_model(best_model_path, akida_model=akida_model)
         else:
             print('Saving model...', flush=True)
@@ -669,12 +670,38 @@ def print_training_time_exceeded(is_enterprise_project, max_training_time_s, tot
         print('Alternatively, the enterprise version of Edge Impulse has no limits, see ' +
             'https://www.edgeimpulse.com/pricing for more information.');
 
+def check_gpu_time_exceeded(max_gpu_time_s, total_time):
+    # Check we have a limit on GPU time
+    if (max_gpu_time_s == None):
+        return
+
+    # Check we're running on GPU
+    device_count = ei_tensorflow.gpu.get_gpu_count()
+    if (device_count == 0):
+        return
+
+    # Allow some tolerance
+    tolerance = 1.2
+    if (max_gpu_time_s * tolerance > total_time):
+        return
+
+    # Show an error message
+    print('')
+    print('ERR: Estimated training time (' + get_friendly_time(total_time) + ') ' +
+        'is greater than remaining GPU compute time limit (' + get_friendly_time(max_gpu_time_s) + ').')
+    print('Try switching to CPU for training, or contact sales (hello@edgeimpulse.com) to ' +
+        'increase your GPU compute time limit.')
+    print('')
+
+    # End the job
+    exit(1)
 
 class HandleTrainingDeadline(Callback):
     """ Check when we run out of training time. """
 
-    def __init__(self, max_training_time_s: float, is_enterprise_project: bool):
+    def __init__(self, max_training_time_s: float, max_gpu_time_s: float, is_enterprise_project: bool):
         self.max_training_time_s = max_training_time_s
+        self.max_gpu_time_s = max_gpu_time_s
         self.is_enterprise_project = is_enterprise_project
         self.epoch_0_begin = time.time()
         self.epoch_1_begin = time.time()
@@ -705,6 +732,7 @@ class HandleTrainingDeadline(Callback):
             if (total_time > self.max_training_time_s * 1.2):
                 print_training_time_exceeded(self.is_enterprise_project, self.max_training_time_s, total_time)
                 exit(1)
+            check_gpu_time_exceeded(self.max_gpu_time_s, total_time)
 
 def get_concrete_function(keras_model, input_shape):
     # To produce an optimized model, the converter needs to see a static batch dimension.

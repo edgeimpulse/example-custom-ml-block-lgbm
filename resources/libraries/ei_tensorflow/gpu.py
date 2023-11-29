@@ -1,8 +1,14 @@
-from pynvml import *
 from collections import Counter
+has_pynvml = True
+try:
+    from pynvml import *
+except ImportError:
+    has_pynvml = False
 
 def get_gpu_count():
     """Get the number of GPU devices available for the current process (0 if no GPU)"""
+    if not has_pynvml:
+        return 0
     try:
         nvmlInit()
     except NVMLError:

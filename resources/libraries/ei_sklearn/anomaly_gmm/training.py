@@ -17,17 +17,18 @@ dir_path = os.path.dirname(os.path.realpath(__file__))
 with open(os.path.join(dir_path, 'options.json')) as f:
     options = json.load(f)
 
-model_filename_tflite = 'model_tflite32'
+model_filename_tflite = 'model.tflite'
 model_filename_pickle = 'gmm.pickle'
 features_filename = 'X_train_features.npy'
 metadata_filename = 'model_metadata.json'
+gmm_metadata_filename = 'gmm_metadata.json'
 
 gmm = GaussianMixtureAnomalyScorer(options=options)
 gmm.run_training(dir_path, features_filename, options['axes'])
 gmm.save_model(dir_path, model_filename_tflite, model_filename_pickle,
-    features_filename, metadata_filename, options['axes'])
+    features_filename, metadata_filename, gmm_metadata_filename, options['axes'])
 
-# predict labels of training data, to be used in anomaly explorer
+# save scores of training data, to be used in anomaly explorer
 output_filename = 'cache-gmm-training-scores.json'
-gmm.predict_labels(
+gmm.predict_samples(
     dir_path, features_filename, options['axes'], output_filename)

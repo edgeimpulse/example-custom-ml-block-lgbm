@@ -36,7 +36,7 @@ class GaussianMixtureAnomalyScorer(object):
         self.fit(X)
 
     def save_model(self, dir_path: str, model_filename_tflite: str, model_filename_pickle: str,
-        features_filename: str, metadata_filename: str, axes: list):
+        features_filename: str, metadata_filename: str, gmm_metadata_filename: str, axes: list):
 
         from ei_tensorflow.conversion import (convert_jax_to_tflite_float32)
 
@@ -47,8 +47,9 @@ class GaussianMixtureAnomalyScorer(object):
         X = np.load(os.path.join(dir_path, features_filename))
         X = self.__class__.extract_axis(X, axes)
         scores = self.gmm.score_samples(X)
-        suggested_threshold = np.percentile(scores, 99)
+        suggested_threshold = max(0.1, np.percentile(scores, 99))
 
+        self.save_gmm_attributes(dir_path, gmm_metadata_filename)
         self.write_metadata(dir_path, metadata_filename, axes, suggested_threshold)
 
         # also convert to tflite and save
@@ -63,27 +64,34 @@ class GaussianMixtureAnomalyScorer(object):
         with open(os.path.join(dir_path, model_filename_tflite), 'wb') as f:
             f.write(tflite_model)
 
-    def predict_labels(self, dir_path: str, features_filename: str,
+    def save_gmm_attributes(self, dir_path: str, output_filename: str = None):
+        gmm_attributes = {
+            'means': self.gmm.means_.tolist(),
+            'covariances': self.gmm.covariances_.tolist(),
+            'weights': self.gmm.weights_.tolist(),
+        }
+        if output_filename:
+            with open(os.path.join(dir_path, output_filename), 'w') as f:
+                f.write(json.dumps(gmm_attributes))
+        else:
+            print('Begin output')
+            print(json.dumps(gmm_attributes))
+            print('End output')
+
+    def predict_samples(self, dir_path: str, features_filename: str,
         axes: list, output_filename: str = None):
 
         X = np.load(os.path.join(dir_path, features_filename))
         X = GaussianMixtureAnomalyScorer.extract_axis(X, axes)
 
-        # Note: just until we decide on what data to use in the explorer
-        explorer_with_predict = False
-        if explorer_with_predict:
-            # equivalent of predict, gives the full prediction distribution
-            y_pred = self.gmm.predict_proba(X)
-            labels = np.argmax(y_pred, axis=-1)
-        else:
-            labels = self.gmm.score_samples(X)
+        scores = self.gmm.score_samples(X)
 
         if output_filename:
             with open(os.path.join(dir_path, output_filename), 'w') as f:
-                f.write(json.dumps(labels.tolist()))
+                f.write(json.dumps(scores.tolist()))
         else:
             print('Begin output')
-            print(json.dumps(labels.tolist()))
+            print(json.dumps(scores.tolist()))
             print('End output')
 
     @staticmethod
@@ -98,8 +106,7 @@ class GaussianMixtureAnomalyScorer(object):
             scores_tflite = []
             for item in inputs.astype(np.float32):
                 X_sample = np.take(item, axes)
-                score = ei_tensorflow.inference.run_model(mode='jax', interpreter=interpreter, item=X_sample, specific_input_shape=None,
-                                                          image_input_scaling=None)
+                score = ei_tensorflow.inference.run_model(mode='jax', interpreter=interpreter, item=X_sample, specific_input_shape=None)
                 if len(score) == 0:
                     raise Exception("Format of score result was not a list as expected")
                 scores_tflite.append(score[0])

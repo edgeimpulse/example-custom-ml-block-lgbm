@@ -1,4 +1,4 @@
 # Empty on purpose, add extra dependencies here
 lightgbm==3.3.5
-numpy==1.26.2
+numpy==1.24.4
 scikit-learn==1.3.2

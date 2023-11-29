@@ -3,14 +3,17 @@
 # Comments are automatically stripped out unless they start with "#!".
 #########################################################################################
 
+import os
 import tensorflow as tf
 import numpy as np
 from akida_models import akidanet_imagenet
 from keras import Model
-from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.optimizers.legacy import Adam
 from tensorflow.keras.layers import BatchNormalization, Conv2D, Softmax, ReLU
 from cnn2snn import check_model_compatibility
 from ei_tensorflow.constrained_object_detection import models, dataset, metrics, util
+
+WEIGHTS_PREFIX = os.environ.get('WEIGHTS_PREFIX', os.getcwd())
 
 def build_model(input_shape: tuple, alpha: float,
                 num_classes: int, weight_regularizer=None) -> tf.keras.Model:
@@ -41,7 +44,7 @@ def build_model(input_shape: tuple, alpha: float,
     #! akidanet_imagenet_160.h5                      - float32 model, 160x160x3, alpha=1.00
     #! akidanet_imagenet_160_alpha_50.h5             - float32 model, 160x160x3, alpha=0.50
     #! akidanet_imagenet_160_alpha_25.h5             - float32 model, 160x160x3, alpha=0.25
-    pretrained_weights = './transfer-learning-weights/akidanet/akidanet_imagenet_224_alpha_50.h5'
+    pretrained_weights = os.path.join(WEIGHTS_PREFIX , 'transfer-learning-weights/akidanet/akidanet_imagenet_224_alpha_50.h5')
     a_base_model.load_weights(pretrained_weights, by_name=True, skip_mismatch=True)
     a_base_model.trainable = True
 
@@ -80,7 +83,9 @@ def train(num_classes: int, learning_rate: float, num_epochs: int,
             callbacks: 'list',
             quantize_function,
             qat_function,
-            lr_finder: bool = False) -> tf.keras.Model:
+            batch_size: int,
+            lr_finder: bool = False,
+            ensure_determinism: bool = False) -> tf.keras.Model:
     """ Construct and train a constrained object detection model.
 
     Args:
@@ -98,7 +103,15 @@ def train(num_classes: int, learning_rate: float, num_epochs: int,
         best_model_path: location to save best model path. note: weights
             will be restored from this path based on best val_f1 score.
         input_shape: The shape of the model's input
-        lr_finder: TODO
+        callbacks: List of callbacks
+        quantize_function: Akida quantize function
+        qat_function: Akida quantize-aware training function
+        batch_size: Training batch size
+        lr_finder: If True, the learning_rate will be replaced with a value
+            found by the learning rate finder.
+        ensure_determinism: If true, functions that may be non-
+            deterministic are disabled (e.g. autotuning prefetch). This
+            should be true in test environments.
     Returns:
         Trained keras model.
 
@@ -134,11 +147,26 @@ def train(num_classes: int, learning_rate: float, num_epochs: int,
     #! Build weighted cross entropy loss specific to this model size
     weighted_xent = models.construct_weighted_xent_fn(model.output.shape, object_weight)
 
+    # Prefetch with AUTOTUNE is usually sensible, but can be non-deterministic, so we
+    # allow disabling for integration tests to prevent intermittent fails.
+    prefetch_policy = 1 if ensure_determinism else tf.data.experimental.AUTOTUNE
+
     #! Transform bounding box labels into segmentation maps
-    train_segmentation_dataset = train_dataset.map(dataset.bbox_to_segmentation(
-        output_width_height, num_classes_with_background)).batch(32, drop_remainder=False).prefetch(1)
-    validation_segmentation_dataset = validation_dataset.map(dataset.bbox_to_segmentation(
-        output_width_height, num_classes_with_background, validation=True)).batch(32, drop_remainder=False).prefetch(1)
+    def as_segmentation(ds, shuffle):
+        ds = ds.map(dataset.bbox_to_segmentation(output_width_height, num_classes_with_background))
+        if not ensure_determinism and shuffle:
+            ds = ds.shuffle(buffer_size=batch_size*4)
+        ds = ds.batch(batch_size, drop_remainder=False).prefetch(prefetch_policy)
+        return ds
+
+    train_segmentation_dataset = as_segmentation(train_dataset, True)
+    validation_segmentation_dataset = as_segmentation(validation_dataset, False)
+
+    # Do an additional version of the validation dataset that is passed to the
+    # centroid scoring callback ( which uses (x, (bb, labels)) ) _with_ the mapping
+    validation_dataset_for_callback = (validation_dataset
+        .batch(batch_size, drop_remainder=False)
+        .prefetch(prefetch_policy))
 
     #! Initialise bias of final classifier based on training data prior.
     util.set_classifier_biases_from_dataset(
@@ -153,7 +181,7 @@ def train(num_classes: int, learning_rate: float, num_epochs: int,
 
     #! Create callback that will do centroid scoring on end of epoch against
     #! validation data. Include a callback to show % progress in slow cases.
-    centroid_callback = metrics.CentroidScoring(validation_segmentation_dataset,
+    centroid_callback = metrics.CentroidScoring(validation_dataset_for_callback,
                                                 output_width_height, num_classes_with_background)
     print_callback = metrics.PrintPercentageTrained(num_epochs)
 

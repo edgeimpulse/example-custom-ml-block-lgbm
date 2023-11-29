@@ -71,3 +71,12 @@ def calculate_freq(interval):
     if abs(freq - round(freq)) < 0.001:
         freq = round(freq)
     return freq
+
+def can_cache_data(X_train):
+    """Returns True if data will fit in cache"""
+    X_train_size_bytes = X_train.size * X_train.itemsize
+    max_memory_bytes = 0
+    if os.environ.get("EI_MAX_MEMORY_MB"):
+        max_memory_bytes = int(os.environ.get("EI_MAX_MEMORY_MB")) * 1024 * 1024
+
+    return (X_train_size_bytes * 2) < max_memory_bytes

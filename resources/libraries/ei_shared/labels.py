@@ -15,6 +15,9 @@ class Centroid(object):
         dy = self.y - other.y
         return math.sqrt(dx*dx+dy*dy)
 
+    def as_int(self):
+        return Centroid(int(self.x), int(self.y), self.label)
+
     def __iter__(self):
         yield self.x
         yield self.y

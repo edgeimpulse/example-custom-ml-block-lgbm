@@ -67,7 +67,7 @@ def pred_from_savedmodel(model, SHAPE, sample_count, x_path):
     X_0 = X[0:1]
     X_0 = X_0.reshape(tuple([ X_0.shape[0] ]) + SHAPE)
 
-    embeddings_len = model.predict(X_0).shape[1]
+    embeddings_len = model.predict(X_0, verbose=0).shape[1]
     X_pred = np.memmap('/tmp/X_pred.npy', dtype='float32', mode='w+', shape=(sample_count, embeddings_len))
 
     slice_size = 100
@@ -80,7 +80,7 @@ def pred_from_savedmodel(model, SHAPE, sample_count, x_path):
 
         X_slice = X[i:i+slice_size].copy()
         X_slice = X_slice.reshape(tuple([ X_slice.shape[0] ]) + SHAPE)
-        X_pred[i:i+slice_size] = model.predict(X_slice)
+        X_pred[i:i+slice_size] = model.predict(X_slice, verbose=0)
 
         end_pred = time_ms()
         if i == 0:
