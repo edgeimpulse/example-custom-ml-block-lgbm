@@ -113,6 +113,7 @@ def main_function():
     params['lambda_l1'] = args.l1
     params['min_child_weight'] = args.min_child_weight
     params['feature_fraction'] = args.feature_fraction
+    params['num_iterations'] = args.num_iterations
 
     print('params:')
     print(params)
