@@ -1,6 +1,8 @@
-# Local training pipeline for "Edge Impulse Inc. / LGBM random forest demo (custom block)"
+# Custom LightGBM ML block examples for Edge Impulse
 
-This is the local training pipeline (based on Keras / TensorFlow) for your Edge Impulse project [Edge Impulse Inc. / LGBM random forest demo (custom block)](http://localhost:4800/studio/245576) (http://localhost:4800/studio/245576). Use it to train your model locally or run experiments. Once you're done with experimentation you can push the model back into Edge Impulse, and retrain from there.
+This repository is an example on how to [add a custom learning block](https://docs.edgeimpulse.com/docs/edge-impulse-studio/learning-blocks/adding-custom-learning-blocks) to Edge Impulse. This repository contains a LightGBM classifier and a LightGBM regression model.
+
+As a primer, read the [Custom learning blocks](https://docs.edgeimpulse.com/docs/edge-impulse-studio/learning-blocks/adding-custom-learning-blocks) page in the Edge Impulse docs.
 
 ## Running the pipeline
 
@@ -9,28 +11,85 @@ You run this pipeline via Docker. This encapsulates all dependencies and package
 ### Running via Docker
 
 1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/).
-2. Open a command prompt or terminal window.
-3. Build the container:
+2. Install the [Edge Impulse CLI](https://docs.edgeimpulse.com/docs/edge-impulse-cli/cli-installation) v1.16.0 or higher.
+3. We need an Edge Impulse project with some data. Preferably create a new one and upload your own data, or alternatively:
+
+    **Classifier**
+
+    Clone a classification project, e.g. [Tutorial: continuous motion recognition](https://studio.edgeimpulse.com/public/14299/latest)
+
+    **Regression**
+
+    Clone a regression project, e.g. [Tutorial: temperature regression](https://studio.edgeimpulse.com/public/17972/latest)
+
+4. If you've created a new project, then under **Create impulse** add a processing block, and either a Classification or Regression block (depending on your data).
+5. Open a command prompt or terminal window.
+6. Initialize the block:
+
+    **Classifier**
 
     ```
-    $ docker build -t custom-block-245576 .
+    cd classifier
+    $ edge-impulse-blocks init
+    # Answer the questions:
+    # ? Choose a type of block: "Machine learning block"
+    # ? Choose an option: "Create a new block"
+    # ? Enter the name of your block: "LightGBM classifier"
+    # ? What type of data does this model operate on? "Classification"
+    # ? Where can your model train? "Both CPU or GPU (default)"
     ```
 
-4. Train your model:
-
-    **macOS, Linux**
+    **Regression**
 
     ```
-    $ docker run --rm -v $PWD:/scripts custom-block-245576 --data-directory data --out-directory out
+    cd regression
+    $ edge-impulse-blocks init
+    # Answer the questions:
+    # ? Choose a type of block: "Machine learning block"
+    # ? Choose an option: "Create a new block"
+    # ? Enter the name of your block: "LightGBM regression"
+    # ? What type of data does this model operate on? "Regression"
+    # ? Where can your model train? "Both CPU or GPU (default)"
     ```
 
-    **Windows**
+
+7. Fetch new data via:
 
     ```
-    $ docker run --rm -v "%cd%":/scripts custom-block-245576 --data-directory data --out-directory out
+    $ edge-impulse-blocks runner --download-data data/
     ```
 
-5. This will write your model (in TFLite, Saved Model and H5 format) to the `out/` directory.
+8. Build the container:
+
+    **Classifier**
+
+    ```
+    $ cd classifier
+    $ docker build -t lightgbm-classifier .
+    ```
+
+    **Regression**
+
+    ```
+    $ cd regression
+    $ docker build -t lightgbm-regression .
+    ```
+
+9. Run the container to test the script (you don't need to rebuild the container if you make changes):
+
+    **Classifier**
+
+    ```
+    $ docker run --rm -v $PWD:/app lightgbm-classifier --data-directory /app/data --out-directory /app/out
+    ```
+
+    **Regression**
+
+    ```
+    $ docker run --rm -v $PWD:/app lightgbm-regression --data-directory /app/data --out-directory /app/out
+    ```
+
+10. This creates a `model.txt` file in the out directory.
 
 #### Adding extra dependencies
 
