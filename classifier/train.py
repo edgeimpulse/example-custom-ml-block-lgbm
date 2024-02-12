@@ -9,9 +9,7 @@ RANDOM_SEED = 1
 dir_path = os.path.dirname(os.path.realpath(__file__))
 
 parser = argparse.ArgumentParser(description='Edge Impulse LightGBM training scripts')
-parser.add_argument('--info-file', type=str, required=False,
-                    help='train_input.json file with info about classes and input shape',
-                    default=os.path.join(dir_path, 'train_input.json'))
+
 parser.add_argument('--data-directory', type=str, required=True,
                     help='Where to read the data from')
 parser.add_argument('--out-directory', type=str, required=True,
