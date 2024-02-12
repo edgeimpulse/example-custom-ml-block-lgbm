@@ -5,7 +5,7 @@ WORKDIR /app
 ARG DEBIAN_FRONTEND=noninteractive
 
 # Install base packages
-RUN apt update && apt install -y curl zip git lsb-release software-properties-common apt-transport-https vim wget
+RUN apt update && apt install -y curl zip git lsb-release software-properties-common apt-transport-https vim wget libgomp1
 
 # Install Python 3.10
 RUN add-apt-repository ppa:deadsnakes/ppa && \
@@ -30,4 +30,4 @@ RUN pip3 install -r requirements.txt
 COPY . ./
 
 # And tell us where to run the pipeline
-ENTRYPOINT ["./run.sh", "train.py"]
+ENTRYPOINT ["python3", "train.py"]
